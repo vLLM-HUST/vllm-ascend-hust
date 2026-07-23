@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import torch
 
@@ -22,7 +24,10 @@ from vllm_ascend.simllm.utils import (
 
 
 class _Nested:
-    pass
+    hidden_size: int
+    get_input_embeddings: Any
+    model: _Nested
+    embed_tokens: Any
 
 
 class _CallableEmbeddingModel:

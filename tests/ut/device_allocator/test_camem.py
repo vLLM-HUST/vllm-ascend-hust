@@ -13,17 +13,18 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import importlib
 import builtins
+import importlib
+import importlib.util
 import sys
 import types
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from tests.ut.base import PytestBase
-
 
 _MISSING = object()
 
@@ -63,19 +64,18 @@ class TestCaMem(PytestBase):
     def test_camem_loads_memcpy_from_top_level_acl_module(self):
         fake_acl = types.ModuleType("acl")
         fake_rt = types.ModuleType("acl.rt")
-        fake_rt.memcpy = object()
+        fake_rt.memcpy = object()  # type: ignore[attr-defined]
         fake_acl.rt = fake_rt  # type: ignore[attr-defined]
 
-        module = load_camem_module(fake_acl)
+        module = cast(Any, load_camem_module(fake_acl))
 
-        assert module.memcpy is fake_rt.memcpy
+        assert module.memcpy is cast(Any, fake_rt).memcpy
 
     def test_camem_discovers_acl_site_packages_when_sys_path_is_missing(self, tmp_path, monkeypatch):
         site_packages = tmp_path / "Ascend" / "cann" / "python" / "site-packages"
         site_packages.mkdir(parents=True)
         (site_packages / "acl.py").write_text(
-            "class rt:\n"
-            "    memcpy = object()\n",
+            "class rt:\n    memcpy = object()\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("ASCEND_HOME_PATH", str(tmp_path / "Ascend" / "cann"))
@@ -139,9 +139,7 @@ class TestCaMem(PytestBase):
         mock_allocator_class = MagicMock()
         mock_init_module = MagicMock()
         with (
-            patch.object(
-                camem.torch.npu.memory, "NPUPluggableAllocator", mock_allocator_class
-            ),
+            patch.object(camem.torch.npu.memory, "NPUPluggableAllocator", mock_allocator_class),
             patch.object(camem, "init_module", mock_init_module),
         ):
             mock_allocator_class.return_value = mock_allocator_instance
@@ -285,9 +283,7 @@ class TestCaMem(PytestBase):
         mock_ctx.__enter__.return_value = "data"
         mock_ctx.__exit__.return_value = None
 
-        with patch.object(
-            camem, "use_memory_pool_with_allocator", return_value=mock_ctx
-        ):
+        with patch.object(camem, "use_memory_pool_with_allocator", return_value=mock_ctx):
             with allocator.use_memory_pool(tag="my_tag"):
                 assert allocator.current_tag == "my_tag"
             # restore old tag after context manager exits

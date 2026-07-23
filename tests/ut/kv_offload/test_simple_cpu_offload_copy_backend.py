@@ -7,6 +7,8 @@
 import queue
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from vllm_ascend.simple_kv_offload.copy_backend import NPUDmaCopyBackend
 
 
@@ -15,7 +17,7 @@ def test_launch_copy_queues_wait_event() -> None:
     backend._store_params = object()
     backend._queue = queue.SimpleQueue()
     wait_event = object()
-    events_list = []
+    events_list: list[tuple[int, torch.npu.Event]] = []
 
     backend.launch_copy([1], [2], True, 3, events_list, wait_event)
 
@@ -36,7 +38,8 @@ def test_store_waits_for_compute_event_before_copy() -> None:
     backend._load_stream = MagicMock()
     backend._store_stream = MagicMock()
     backend._queue = queue.SimpleQueue()
-    backend._queue.put(([1], [2], object(), True, 3, events_list := [], wait_event := MagicMock()))
+    events_list: list[tuple[int, torch.npu.Event]] = []
+    backend._queue.put(([1], [2], object(), True, 3, events_list, wait_event := MagicMock()))
     backend._queue.put(None)
 
     order = []

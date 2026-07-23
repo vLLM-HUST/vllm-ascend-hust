@@ -15,7 +15,7 @@ def _load_sync_helpers():
         "_ensure_ascend_compilation_config_dict",
         "_sync_npugraph_ex_to_additional_config",
     }
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    functions: list[ast.stmt] = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     module = ast.Module(body=functions, type_ignores=[])
     namespace: dict[str, object] = {}
     exec(compile(module, PLATFORM_PATH, "exec"), namespace)
