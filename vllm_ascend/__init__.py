@@ -16,7 +16,7 @@
 #
 
 try:
-    from ._version import (  # noqa: F401
+    from ._version import (  # type: ignore[import-untyped]  # noqa: F401
         __commit_id__,
         __upstream_commit__,
         __upstream_version__,

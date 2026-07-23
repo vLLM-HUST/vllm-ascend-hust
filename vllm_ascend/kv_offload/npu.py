@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandlers
 
+_TIERING_IMPORT_ERROR: ModuleNotFoundError | None
 try:
     from vllm.v1.kv_offload.tiering.spec import (
         TieringOffloadingSpec as _TieringOffloadingSpec,
@@ -44,10 +45,7 @@ def _set_cpu_bytes_from_legacy_num_blocks(
         extra_config["cpu_bytes_to_use"] = 1
         return
 
-    gpu_block_sizes = {
-        kv_cache_group.kv_cache_spec.block_size
-        for kv_cache_group in kv_cache_config.kv_cache_groups
-    }
+    gpu_block_sizes = {kv_cache_group.kv_cache_spec.block_size for kv_cache_group in kv_cache_config.kv_cache_groups}
     block_size_factor = 1
     offloaded_block_size = extra_config.get("block_size")
     if offloaded_block_size is not None:
@@ -128,13 +126,11 @@ if _TieringOffloadingSpec is not None:
             )
 else:
 
-    class NPUTieringOffloadingSpec:
+    class NPUTieringOffloadingSpec:  # type: ignore[no-redef]
         """Placeholder for vLLM builds that do not yet expose tiering APIs."""
 
         def __init__(self, *args: Any, **kwargs: Any):
-            raise ImportError(
-                "NPUTieringOffloadingSpec requires vllm.v1.kv_offload.tiering"
-            ) from _TIERING_IMPORT_ERROR
+            raise ImportError("NPUTieringOffloadingSpec requires vllm.v1.kv_offload.tiering") from _TIERING_IMPORT_ERROR
 
 
 CPUOffloadingSpec = NPUOffloadingSpec

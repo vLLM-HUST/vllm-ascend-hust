@@ -538,8 +538,7 @@ class NPUPlatform(Platform):
             isinstance(layer, str) and layer for layer in layer_sharding
         ):
             raise ValueError(
-                "additional_config.layer_sharding must be a list of non-empty "
-                f"strings, got {layer_sharding!r}."
+                f"additional_config.layer_sharding must be a list of non-empty strings, got {layer_sharding!r}."
             )
 
     @classmethod
@@ -1066,7 +1065,11 @@ class NPUPlatform(Platform):
             dict[str, Any]: _description_
         """
         # NOTE(Ronald1995): avoid circular import.
-        from vllm_ascend.ascend_forward_context import get_mc2_mask, select_moe_comm_method
+        from vllm_ascend.ascend_forward_context import (
+            get_mc2_mask,
+            get_mrv2_in_profile_run,
+            select_moe_comm_method,
+        )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
@@ -1390,10 +1393,6 @@ class NPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
-
-    @classmethod
-    def manual_seed_all(cls, seed: int) -> None:
-        pass
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:

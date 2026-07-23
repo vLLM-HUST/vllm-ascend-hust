@@ -1748,7 +1748,13 @@ class NPUModelRunner(GPUModelRunner):
             # Speculative decoding is not enabled.
             draft_token_ids = None
         elif self.speculative_config.method in ("ngram", "suffix"):
+            assert isinstance(valid_sampled_token_ids, list)
             if self.speculative_config.method == "ngram":
+                from vllm_ascend.spec_decode.ngram_proposer import (
+                    AscendNgramProposer,
+                )
+
+                assert isinstance(self.drafter, AscendNgramProposer)
                 draft_token_ids = self.drafter.propose(
                     self.speculative_config.num_speculative_tokens,
                     valid_sampled_token_ids,
@@ -1756,6 +1762,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.token_ids_cpu,
                 )
             else:
+                assert isinstance(self.drafter, AscendSuffixDecodingProposer)
                 draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])

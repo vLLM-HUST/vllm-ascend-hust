@@ -1,7 +1,7 @@
 import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -13,7 +13,6 @@ from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
-logger = init_logger(__name__)
 _MISSING_TOP_K_TOP_P_OP_WARNED = False
 _BROKEN_TOP_K_TOP_P_OP_WARNED = False
 _DISABLE_TOP_K_TOP_P_CUSTOM_OP = False
@@ -316,8 +315,7 @@ def _warn_top_k_top_p_fallback(reason: str) -> None:
     if _MISSING_TOP_K_TOP_P_OP_WARNED:
         return
     logger.warning(
-        "Custom op npu_apply_top_k_top_p is unavailable (%s); "
-        "falling back to the pytorch implementation.",
+        "Custom op npu_apply_top_k_top_p is unavailable (%s); falling back to the pytorch implementation.",
         reason,
     )
     _MISSING_TOP_K_TOP_P_OP_WARNED = True

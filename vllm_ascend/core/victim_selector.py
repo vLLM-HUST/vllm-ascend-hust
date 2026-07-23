@@ -42,28 +42,18 @@ class UtilityVictimSelectorConfig:
                     defaults.enable_utility_victim_selection,
                 )
             ),
-            utility_kill_switch=bool(
-                config_data.get("utility_kill_switch", defaults.utility_kill_switch)
-            ),
+            utility_kill_switch=bool(config_data.get("utility_kill_switch", defaults.utility_kill_switch)),
             utility_completion_weight=float(
                 config_data.get("utility_completion_weight", defaults.utility_completion_weight)
             ),
-            utility_preempt_weight=float(
-                config_data.get("utility_preempt_weight", defaults.utility_preempt_weight)
-            ),
+            utility_preempt_weight=float(config_data.get("utility_preempt_weight", defaults.utility_preempt_weight)),
             utility_kv_gate=float(config_data.get("utility_kv_gate", defaults.utility_kv_gate)),
-            utility_cooldown_s=float(
-                config_data.get("utility_cooldown_s", defaults.utility_cooldown_s)
-            ),
-            utility_min_running=int(
-                config_data.get("utility_min_running", defaults.utility_min_running)
-            ),
+            utility_cooldown_s=float(config_data.get("utility_cooldown_s", defaults.utility_cooldown_s)),
+            utility_min_running=int(config_data.get("utility_min_running", defaults.utility_min_running)),
             utility_snapshot_enabled=bool(
                 config_data.get("utility_snapshot_enabled", defaults.utility_snapshot_enabled)
             ),
-            utility_snapshot_top_k=int(
-                config_data.get("utility_snapshot_top_k", defaults.utility_snapshot_top_k)
-            ),
+            utility_snapshot_top_k=int(config_data.get("utility_snapshot_top_k", defaults.utility_snapshot_top_k)),
             utility_snapshot_history_size=int(
                 config_data.get(
                     "utility_snapshot_history_size",
@@ -282,9 +272,7 @@ class UnifiedVictimSelector:
         preemptions = max(float(num_preemptions), 0.0)
 
         delta = (
-            1.0
-            + self.config.utility_completion_weight * completion
-            + self.config.utility_preempt_weight * preemptions
+            1.0 + self.config.utility_completion_weight * completion + self.config.utility_preempt_weight * preemptions
         )
         utility = reward / max(delta + self.config.utility_epsilon, self.config.utility_epsilon)
         evict_score = utility
@@ -379,16 +367,14 @@ class UnifiedVictimSelector:
 
         consecutive_preempt_ratio = 0.0
         if self._consecutive_preemption_checks > 0:
-            consecutive_preempt_ratio = (
-                self._consecutive_preemption_events / self._consecutive_preemption_checks
-            )
+            consecutive_preempt_ratio = self._consecutive_preemption_events / self._consecutive_preemption_checks
 
         return {
             "total_preemptions": self._total_preemptions,
             "total_tokens_freed": self._total_tokens_freed,
             "kv_pressure_events": self._kv_pressure_events,
             "consecutive_preempt_ratio": consecutive_preempt_ratio,
-            "preemptions_per_request_p95": self._percentile(self._preemptions_per_request.values(), 95),
+            "preemptions_per_request_p95": self._percentile(list(self._preemptions_per_request.values()), 95),
             "preempted_req_ids": list(self._recent_preempted_req_ids),
             "strategy_hit_rate": hit_rate,
             "utility_strategy_hits": self._utility_strategy_hits,

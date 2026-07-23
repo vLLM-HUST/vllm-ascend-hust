@@ -21,16 +21,18 @@ from pathlib import Path
 from vllm.logger import logger
 
 try:
-    from vllm.transformers_utils.modelscope_utils import (
+    from vllm.transformers_utils.modelscope_utils import (  # type: ignore[import-not-found]
         configure_modelscope_runtime,
         should_use_modelscope,
     )
 except ModuleNotFoundError:
+
     def configure_modelscope_runtime() -> None:
         return None
 
     def should_use_modelscope() -> bool:
         return False
+
 
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -89,8 +91,7 @@ def get_model_file(
             return Path(downloaded_path)
     except Exception as e:
         logger.warning(
-            "Could not download %s from %s via ModelScope; falling back to "
-            "Hugging Face Hub: %s",
+            "Could not download %s from %s via ModelScope; falling back to Hugging Face Hub: %s",
             filename,
             model,
             e,

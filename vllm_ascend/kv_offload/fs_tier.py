@@ -16,6 +16,7 @@ import random
 import threading
 from typing import Any
 
+_TIERING_IMPORT_ERROR: ModuleNotFoundError | None
 try:
     from vllm.v1.kv_offload.tiering.base import JobMetadata
     from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
@@ -143,11 +144,9 @@ class AscendFileSystemTierManager(FileSystemTierManager):
 
         direct = getattr(os, "O_DIRECT", 0) if use_direct_io else 0
         if use_direct_io and direct == 0:
-            logger.warning(
-                "use_direct_io=True but O_DIRECT is unavailable; using buffered I/O."
-            )
-        self._store_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | direct
-        self._load_flags = os.O_RDONLY | direct
+            logger.warning("use_direct_io=True but O_DIRECT is unavailable; using buffered I/O.")
+        self._store_flags: int = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | direct
+        self._load_flags: int = os.O_RDONLY | direct
 
         super().__init__(
             offloading_spec=offloading_spec,
