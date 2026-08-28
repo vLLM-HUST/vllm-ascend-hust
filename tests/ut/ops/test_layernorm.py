@@ -3,8 +3,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
 
+from vllm_ascend.ops.layernorm import AscendRMSNormGated
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -82,3 +83,61 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+@pytest.mark.parametrize(
+    ("activation", "norm_before_gate"),
+    [("silu", True), ("swish", False), ("sigmoid", True)],
+)
+@patch("torch_npu.npu_rms_norm")
+def test_rmsnorm_gated_uses_native_npu_path(mock_rms_norm, activation, norm_before_gate, default_vllm_config):
+    layer = AscendRMSNormGated(
+        hidden_size=8,
+        eps=1e-5,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+    )
+    x = torch.randn(2, 8, dtype=torch.float32)
+    z = torch.randn(2, 8, dtype=torch.float32)
+    normed = torch.randn(2, 8, dtype=torch.float32)
+    mock_rms_norm.return_value = (normed, None)
+    activation_output = torch.sigmoid(z) if activation == "sigmoid" else torch.nn.functional.silu(z)
+
+    with (
+        patch.object(RMSNormGated, "forward_native", autospec=True) as mock_native,
+        patch("vllm_ascend.ops.layernorm.LayerNormFn.apply") as mock_triton_path,
+    ):
+        out = layer.forward_oot(x, z)
+
+    mock_native.assert_not_called()
+    mock_triton_path.assert_not_called()
+    mock_rms_norm.assert_called_once()
+    rms_norm_args = mock_rms_norm.call_args.args
+    expected_input = x if norm_before_gate else x * activation_output
+    assert torch.allclose(rms_norm_args[0], expected_input)
+    assert rms_norm_args[1] is layer.weight
+    assert rms_norm_args[2] == layer.eps
+    expected = normed * activation_output if norm_before_gate else normed
+    assert torch.allclose(out, expected)
+
+
+def test_rmsnorm_gated_keeps_native_group_norm(default_vllm_config):
+    layer = AscendRMSNormGated(hidden_size=8, eps=1e-5, group_size=4)
+    x = torch.randn(2, 8, dtype=torch.float32)
+    z = torch.randn(2, 8, dtype=torch.float32)
+    expected = torch.randn(2, 8, dtype=torch.float32)
+
+    with (
+        patch.object(
+            RMSNormGated,
+            "forward_native",
+            autospec=True,
+            return_value=expected,
+        ) as mock_native,
+        patch("vllm_ascend.ops.layernorm.LayerNormFn.apply") as mock_triton_path,
+    ):
+        out = layer.forward_oot(x, z)
+
+    mock_native.assert_called_once_with(layer, x, z)
+    mock_triton_path.assert_not_called()
+    assert out is expected

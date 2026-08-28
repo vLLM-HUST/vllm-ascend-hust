@@ -16,6 +16,7 @@
 
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
@@ -69,9 +70,7 @@ class AscendRMSNorm(RMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            x, _, residual = torch_npu.npu_add_rms_norm(
-                x, residual, self.weight, self.variance_epsilon
-            )
+            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
             if self.bias is not None:
                 x.add_(self.bias)
             return x, residual
@@ -95,9 +94,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            x, _, residual = torch_npu.npu_add_rms_norm(
-                x, residual, 1.0 + self.weight, self.variance_epsilon
-            )
+            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
         x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
@@ -190,6 +187,30 @@ class AscendRMSNormGated(RMSNormGated):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
+    def _apply_activation(self, z: torch.Tensor) -> torch.Tensor:
+        if self.activation == "sigmoid":
+            return torch.sigmoid(z)
+        if self.activation in ("silu", "swish"):
+            return F.silu(z)
+        raise AssertionError(f"Unsupported activation: {self.activation}")
+
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+        # Qwen3-Next/Qwen3.5 uses group_size=None.  Keep this path on the
+        # native NPU RMSNorm operator so ACLGraph compilation does not depend
+        # on an optional Triton backend.  The decomposed implementation is
+        # also the implementation used by the upstream 310P backend.
+        if self.group_size is not None:
+            return super().forward_native(x, z)
+
+        if z is not None and not self.norm_before_gate:
+            x = torch.mul(x, self._apply_activation(z))
+
+        import torch_npu
+
+        x, _ = torch_npu.npu_rms_norm(x, self.weight, self.eps)
+
+        if z is not None and self.norm_before_gate:
+            x = torch.mul(x, self._apply_activation(z))
+
+        return x
