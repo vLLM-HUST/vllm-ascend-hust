@@ -22,6 +22,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+from vllm.triton_utils import HAS_TRITON
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -36,12 +37,13 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import is_310p
 
 _GDN_PATCH_TARGET = _GDNBaseCls
+_HAS_TRITON_MROPE_FUSION = HAS_TRITON and hasattr(torch.ops.vllm, "triton_split_qkv_rmsnorm_mrope")
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if "qwen3_5" in self.config.model_type and _HAS_TRITON_MROPE_FUSION:
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
@@ -63,20 +65,11 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 has_gate=self.attn_output_gate,
             )
         else:
-            if self.attn_output_gate:
-                q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
-                orig_shape = q_gate.shape[:-1]
-                q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
-                q, gate = torch.chunk(q_gate, 2, dim=-1)
-                q = q.reshape(*orig_shape, -1)
-                gate = gate.reshape(*orig_shape, -1)
-            else:
-                q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-            q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(-1, self.num_heads * self.head_dim)
-            k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(-1, self.num_kv_heads * self.head_dim)
-
-            q, k = self.rotary_emb(positions, q, k)
+            # Reuse vLLM's canonical split, Q/K normalization and RoPE path
+            # when the optional Triton fusion was not registered.  This keeps
+            # Qwen3.5/Qwen3.8 graph capture valid on Triton-free Ascend images
+            # and preserves the fusion unchanged when it is available.
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
 
         attn_output = self.attn(q, k, v)
 
