@@ -21,7 +21,6 @@ import torch_npu
 from einops import rearrange
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fla.ops import chunk_gated_delta_rule
-from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet
 from vllm.triton_utils import triton
@@ -30,6 +29,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ops.l2norm import l2norm_npu
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.patch.worker.patch_qwen3_5 import to_int64_tuple
@@ -219,8 +219,8 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         if spec_sequence_masks is not None:
             cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
             actual_seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
+            query_spec = l2norm_npu(query_spec)
+            key_spec = l2norm_npu(key_spec)
             core_attn_out_spec = torch_npu.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
@@ -269,8 +269,8 @@ class AscendQwen3Next_GatedDeltaNet(Qwen3NextGatedDeltaNet):
         elif attn_metadata.num_decodes > 0:
             cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
             actual_seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            query_non_spec = l2norm_npu(query_non_spec)
+            key_non_spec = l2norm_npu(key_non_spec)
             core_attn_out_non_spec = torch_npu.npu_recurrent_gated_delta_rule(
                 query=query_non_spec.squeeze(0),
                 key=key_non_spec.squeeze(0),
