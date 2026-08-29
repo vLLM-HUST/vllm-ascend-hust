@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "canonical_registry": "https://github.com/vLLM-HUST/vllm-hust-docs/tree/codex/ecosystem-architecture-reorganization/registry",
+  "repository": "https://github.com/vLLM-HUST/vllm-ascend",
+  "repository_role": "platform_profile",
+  "relation_to_runtime": "implements_core_contracts",
+  "lifecycle": "community",
+  "artifacts": [
+    {
+      "id": "vllm-ascend-upstream-tracking-profile",
+      "artifact_type": "platform_profile",
+      "system_role": "platform_backend",
+      "delivery_model": "platform_distribution",
+      "execution_planes": ["scheduler", "worker", "native", "device"],
+      "integration_contracts": [],
+      "integration_surfaces": ["vllm.platform_plugins", "vLLM hardware-pluggable interface"]
+    }
+  ],
+  "system_boundaries": {
+    "is": [
+      "an upstream-tracking Ascend platform profile and hardware plugin distribution",
+      "a synchronization source distinct from the canonical HUST platform profile"
+    ],
+    "is_not": [
+      "the canonical vLLM-HUST Ascend profile",
+      "a single operator or generic plugin bundle",
+      "the Ascend CANN runtime itself"
+    ]
+  },
+  "validation": ["bash format.sh ci", "pytest -q tests/ut"],
+  "compatibility_document": "README.md"
+}
