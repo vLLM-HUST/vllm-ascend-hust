@@ -35,10 +35,12 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
-                        test_vals = ["123", "456"]
-                    elif "bool(int(" in handler_source:
+                    if "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
+                    elif "float(" in handler_source:
+                        test_vals = ["0.25", "0.75"]
+                    elif "int(" in handler_source:
+                        test_vals = ["123", "456"]
                     else:
                         test_vals = [f"test_{var_name}", f"custom_{var_name}"]
 
@@ -57,3 +59,25 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_compile_ops_defaults_to_full_build(self):
+        original_val = os.environ.pop("VLLM_ASCEND_COMPILE_OPS", None)
+        try:
+            self.assertEqual(envs_ascend.VLLM_ASCEND_COMPILE_OPS, "ALL")
+        finally:
+            if original_val is not None:
+                os.environ["VLLM_ASCEND_COMPILE_OPS"] = original_val
+
+    def test_compile_ops_accepts_a_focused_operator(self):
+        original_val = os.environ.get("VLLM_ASCEND_COMPILE_OPS")
+        try:
+            os.environ["VLLM_ASCEND_COMPILE_OPS"] = "activation_sparse_linear"
+            self.assertEqual(
+                envs_ascend.VLLM_ASCEND_COMPILE_OPS,
+                "activation_sparse_linear",
+            )
+        finally:
+            if original_val is None:
+                os.environ.pop("VLLM_ASCEND_COMPILE_OPS", None)
+            else:
+                os.environ["VLLM_ASCEND_COMPILE_OPS"] = original_val

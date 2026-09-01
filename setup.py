@@ -532,6 +532,7 @@ class cmake_build_ext(build_ext):
         }
         CANN_SOC_VERSION = soc_version_map.get(envs.SOC_VERSION, envs.SOC_VERSION)
         cmake_args += [f"-DSOC_VERSION={CANN_SOC_VERSION}"]
+        cmake_args += [f"-DASCEND_OP_NAME={envs.VLLM_ASCEND_COMPILE_OPS}"]
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,

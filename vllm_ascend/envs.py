@@ -41,6 +41,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    # Comma-separated AscendC operator names to compile when custom-kernel
+    # compilation is enabled. The default keeps the normal full-package build.
+    # Focused development images may select one or more operators already
+    # declared by the CMake ASCEND_OP_NAME contract (for example,
+    # "activation_sparse_linear"). This variable is not sensitive.
+    "VLLM_ASCEND_COMPILE_OPS": lambda: os.getenv("VLLM_ASCEND_COMPILE_OPS", "ALL"),
     # Whether to build and install AclNN custom op packages before compiling the
     # torch extension. Keep enabled for normal package builds. Set to 0 only for
     # focused extension rebuilds that do not need to refresh AclNN op packages.
