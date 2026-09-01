@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import contextlib
 import sys
 
 import torch
@@ -24,13 +25,13 @@ _device_op_module = sys.modules.get("vllm_ascend.device.device_op")
 _device_op_initializing = _device_op_module is not None and not hasattr(_device_op_module, "DeviceOperator")
 
 if not _device_op_initializing:
-    try:
+    # Some vLLM checkouts have a newer fused_moe layout. Dense Llama/Qwen
+    # sparse-kernel experiments do not need Ascend FusedMoE registration.
+    with contextlib.suppress(ImportError, ModuleNotFoundError):
         import vllm_ascend.ops.fused_moe.fused_moe  # noqa
-    except ModuleNotFoundError as exc:
-        if exc.name != "vllm.model_executor.layers.fused_moe.runner.default_moe_runner":
-            raise
     import vllm_ascend.ops.layernorm  # noqa
     import vllm_ascend.ops.register_custom_ops  # noqa
+    import vllm_ascend.ops.sparse_linear  # noqa
 
 if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
@@ -40,8 +41,11 @@ if HAS_TRITON:
 
 if not _device_op_initializing:
     import vllm_ascend.ops.vocab_parallel_embedding  # noqa
-from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
+from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul  # noqa: E402
+from vllm_ascend.ops.rotary_embedding import (  # noqa: E402
+    AscendDeepseekScalingRotaryEmbedding,
+    AscendRotaryEmbedding,
+)
 
 
 class dummyFusionOp:

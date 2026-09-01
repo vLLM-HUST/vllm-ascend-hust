@@ -17,6 +17,7 @@
 
 import importlib
 
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
@@ -32,6 +33,8 @@ if vllm_version_is("0.23.0"):
 else:
     _V2_MODEL_RUNNER_SUPPORTED = True
 
+logger = init_logger(__name__)
+
 
 def _import_optional_patch(module_name: str) -> None:
     try:
@@ -39,6 +42,13 @@ def _import_optional_patch(module_name: str) -> None:
     except ModuleNotFoundError as exc:
         if exc.name not in {module_name, "torchvision"}:
             raise
+    except ImportError as exc:
+        logger.warning(
+            "Skipping optional worker patch %s because its target API is unavailable: %s",
+            module_name,
+            exc,
+        )
+
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -58,6 +68,7 @@ if not is_310p():
     _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3_5")
     _import_optional_patch("vllm_ascend.patch.worker.patch_gdn_attn")
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+
     _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
@@ -77,6 +88,7 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
+
 _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 
 # Sim-LLM KV reuse — auto-loaded at worker init, gated behind

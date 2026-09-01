@@ -1,12 +1,22 @@
+import os
+
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+_FORCE_CPU_SLOT_MAPPING = os.environ.get("VLLM_ASCEND_FORCE_CPU_SLOT_MAPPING", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 class BlockTable:
@@ -147,6 +157,10 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if _FORCE_CPU_SLOT_MAPPING:
+            logger.warning_once("Using CPU slot mapping because VLLM_ASCEND_FORCE_CPU_SLOT_MAPPING is set.")
+            self._compute_slot_mapping_fallback(num_reqs, query_start_loc, positions)
+            return
         if not hasattr(_compute_slot_mapping_kernel, "__getitem__"):
             self._compute_slot_mapping_fallback(num_reqs, query_start_loc, positions)
             return
@@ -197,8 +211,7 @@ class BlockTable:
         req_indices = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
         if req_indices.shape[0] != num_tokens:
             raise ValueError(
-                "query_start_loc and positions describe different token counts: "
-                f"{req_indices.shape[0]} != {num_tokens}"
+                f"query_start_loc and positions describe different token counts: {req_indices.shape[0]} != {num_tokens}"
             )
 
         if self.dcp_world_size * self.pcp_world_size > 1:

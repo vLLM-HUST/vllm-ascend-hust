@@ -41,6 +41,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    # Whether to build and install AclNN custom op packages before compiling the
+    # torch extension. Keep enabled for normal package builds. Set to 0 only for
+    # focused extension rebuilds that do not need to refresh AclNN op packages.
+    "VLLM_ASCEND_BUILD_ACLNN": lambda: bool(int(os.getenv("VLLM_ASCEND_BUILD_ACLNN", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -110,9 +114,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emergency kill switch for utility-based victim selection.
     "VLLM_ASCEND_UTILITY_KILL_SWITCH": lambda: bool(int(os.getenv("VLLM_ASCEND_UTILITY_KILL_SWITCH", "0"))),
     # Completion factor weight in utility delta calculation.
-    "VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT": lambda: float(
-        os.getenv("VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT", "0.5")
-    ),
+    "VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT": lambda: float(os.getenv("VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT", "0.5")),
     # Preemption-count factor weight in utility delta calculation.
     "VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT": lambda: float(os.getenv("VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT", "0.3")),
     # Minimum KV utilization ratio required to enable utility ranking.
@@ -122,9 +124,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Minimum running queue size required before enabling utility-based victim selection.
     "VLLM_ASCEND_UTILITY_MIN_RUNNING": lambda: int(os.getenv("VLLM_ASCEND_UTILITY_MIN_RUNNING", "1")),
     # Whether to capture shared-snapshot counterfactual records for utility decisions.
-    "VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED", "0"))
-    ),
+    "VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED": lambda: bool(int(os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED", "0"))),
     # Number of top-ranked candidates to keep in each utility decision snapshot.
     "VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K": lambda: int(os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K", "3")),
     # Number of recent utility decision snapshots retained in memory.
@@ -147,73 +147,45 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_DISABLE_TOP_K_TOP_P_CUSTOM_OP": lambda: bool(
         int(os.getenv("VLLM_ASCEND_DISABLE_TOP_K_TOP_P_CUSTOM_OP", "0"))
     ),
-
     # -- Sim-LLM: KV reuse optimization ---------------------------------------
     # Whether to enable Sim-LLM KV reuse optimization. When set to 1, the Sim-LLM
     # patch wraps NPUModelRunner.execute_model() at worker init time.
     # 0: disabled (default), 1: enabled.
     "VLLM_ASCEND_SIMLLM_ENABLED": lambda: bool(int(os.getenv("VLLM_ASCEND_SIMLLM_ENABLED", "0"))),
-
     # Cosine similarity threshold for KV reuse match. Embeddings with cosine
     # similarity >= this value are considered a match. Paper default 0.8.
     # Valid range: [0.0, 1.0]. Higher values = stricter matching, fewer KV reuses.
-    "VLLM_ASCEND_SIMLLM_COSINE_THRESHOLD": lambda: float(
-        os.getenv("VLLM_ASCEND_SIMLLM_COSINE_THRESHOLD", "0.8")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_COSINE_THRESHOLD": lambda: float(os.getenv("VLLM_ASCEND_SIMLLM_COSINE_THRESHOLD", "0.8")),
     # Number of bits for SimHash LSH projection. More bits = fewer collisions
     # but larger hash storage. Paper default 64 (fits in a single int64).
     # Valid range: [16, 256]. Recommended: 32, 64, or 128.
-    "VLLM_ASCEND_SIMLLM_LSH_NUM_BITS": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_LSH_NUM_BITS", "64")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_LSH_NUM_BITS": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_LSH_NUM_BITS", "64")),
     # Batch size threshold for switching from exhaustive cosine to LSH bucket
     # merge strategy. Below this threshold: exact cosine per candidate.
     # At or above: LSH bucket membership with KV merging. Default 32.
-    "VLLM_ASCEND_SIMLLM_LSH_BATCH_THRESHOLD": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_LSH_BATCH_THRESHOLD", "32")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_LSH_BATCH_THRESHOLD": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_LSH_BATCH_THRESHOLD", "32")),
     # Maximum number of cached tasks in KV_Manager. When exceeded, the
     # least-recently-accessed task is evicted (O(1) via OrderedDict).
     # Default 1024. Increase for higher reuse rates on diverse workloads.
-    "VLLM_ASCEND_SIMLLM_KV_CACHE_SIZE": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_KV_CACHE_SIZE", "1024")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_KV_CACHE_SIZE": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_KV_CACHE_SIZE", "1024")),
     # Number of bottom (early) transformer layers whose KV is retained in the
     # sandwich config for unmatched tasks. Default 3 (layers 0, 1, 2).
-    "VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM", "3")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM", "3")),
     # Number of top (late) transformer layers whose KV is retained in the
     # sandwich config for unmatched tasks. Default 3 (layers L-3 .. L-1).
     # Total KV retention = (bottom + top) / num_layers.
-    "VLLM_ASCEND_SIMLLM_SANDWICH_TOP": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_SANDWICH_TOP", "3")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_SANDWICH_TOP": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_SANDWICH_TOP", "3")),
     # Pooling strategy for task embedding extraction from hidden states.
     # Options: "mean" (mean pooling over sequence), "last" (last token only),
     # "cls" (first token / CLS token). Default "mean".
-    "VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING": lambda: os.getenv(
-        "VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING", "mean"
-    ),
-
+    "VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING": lambda: os.getenv("VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING", "mean"),
     # Batch match ratio threshold for deferral logic. If the fraction of matched
     # tasks in a batch exceeds this value, unmatched tasks are deferred to the
     # next scheduling cycle. Valid range: [0.0, 1.0]. Default 0.5.
-    "VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO": lambda: float(
-        os.getenv("VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO", "0.5")
-    ),
-
+    "VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO": lambda: float(os.getenv("VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO", "0.5")),
     # Maximum number of times a task can be deferred before being force-processed
     # regardless of match status. Guards against starvation. Default 3.
-    "VLLM_ASCEND_SIMLLM_MAX_DEFERRALS": lambda: int(
-        os.getenv("VLLM_ASCEND_SIMLLM_MAX_DEFERRALS", "3")
-    ),
+    "VLLM_ASCEND_SIMLLM_MAX_DEFERRALS": lambda: int(os.getenv("VLLM_ASCEND_SIMLLM_MAX_DEFERRALS", "3")),
 }
 
 # end-env-vars-definition

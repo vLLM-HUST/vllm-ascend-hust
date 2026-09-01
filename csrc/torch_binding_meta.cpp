@@ -66,6 +66,58 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
+at::Tensor activation_sparse_linear_meta(const at::Tensor &x,
+                                         const at::Tensor &weight,
+                                         const at::Tensor &threshold,
+                                         bool inclusive)
+{
+    (void)threshold;
+    (void)inclusive;
+    return at::empty({x.size(0), weight.size(0)}, x.options());
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> activation_sparse_pack_meta(
+    const at::Tensor &x,
+    const at::Tensor &threshold,
+    bool inclusive)
+{
+    (void)threshold;
+    (void)inclusive;
+    at::Tensor values = at::empty_like(x);
+    at::Tensor indices = at::empty({x.size(0), x.size(1)},
+                                  x.options().dtype(at::kInt));
+    at::Tensor counts = at::empty({x.size(0)}, x.options().dtype(at::kInt));
+    return {values, indices, counts};
+}
+
+at::Tensor activation_sparse_topk_threshold_meta(
+    const at::Tensor &x,
+    int64_t keep)
+{
+    (void)keep;
+    return at::empty({x.size(0)}, x.options().dtype(at::kFloat));
+}
+
+at::Tensor activation_sparse_linear_packed_meta(const at::Tensor &values,
+                                                const at::Tensor &indices,
+                                                const at::Tensor &counts,
+                                                const at::Tensor &weight)
+{
+    (void)indices;
+    (void)counts;
+    return at::empty({values.size(0), weight.size(0)}, values.options());
+}
+
+at::Tensor activation_sparse_linear_packed_t_meta(const at::Tensor &values,
+                                                  const at::Tensor &indices,
+                                                  const at::Tensor &counts,
+                                                  const at::Tensor &weight_t)
+{
+    (void)indices;
+    (void)counts;
+    return at::empty({values.size(0), weight_t.size(1)}, values.options());
+}
+
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
@@ -1710,6 +1762,16 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
+    // Activation sparse pack
+    ops.impl("activation_sparse_pack", &vllm_ascend::meta::activation_sparse_pack_meta);
+    // Activation sparse exact top-k threshold
+    ops.impl("activation_sparse_topk_threshold", &vllm_ascend::meta::activation_sparse_topk_threshold_meta);
+    // Activation packed sparse linear
+    ops.impl("activation_sparse_linear_packed", &vllm_ascend::meta::activation_sparse_linear_packed_meta);
+    // Activation packed sparse linear with transposed weight
+    ops.impl("activation_sparse_linear_packed_t", &vllm_ascend::meta::activation_sparse_linear_packed_t_meta);
+    // Activation-threshold sparse linear
+    ops.impl("activation_sparse_linear", &vllm_ascend::meta::activation_sparse_linear_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // batch_matmul_transpose

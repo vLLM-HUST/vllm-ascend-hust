@@ -213,7 +213,10 @@ else()
   )
 endif()
 
-target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib")
+set_target_properties(vllm_ascend_C PROPERTIES
+  BUILD_RPATH "\$ORIGIN;\$ORIGIN/lib;\$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib"
+  INSTALL_RPATH "\$ORIGIN;\$ORIGIN/lib;\$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib"
+)
 
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

@@ -5,6 +5,7 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
 
 try:
     import npugraph_ex as nge
@@ -52,12 +53,20 @@ class BasePattern(ABC):
 
         pm.register_replacement(pattern_fn, replacement_fn, example_inputs, pm.fwd_only, pm_pass)
 
-        nge.register_replacement(
-            search_fn=pattern_fn,
-            replace_fn=replacement_fn,
-            example_inputs=example_inputs,
-            extra_check=self.get_extra_stream_scope_check(),
-        )
+        nge_register_replacement = getattr(nge, "register_replacement", None)
+        if nge_register_replacement is not None:
+            nge_register_replacement(
+                search_fn=pattern_fn,
+                replace_fn=replacement_fn,
+                example_inputs=example_inputs,
+                extra_check=self.get_extra_stream_scope_check(),
+            )
+        else:
+            logger.warning_once(
+                "Skipping graph replacement registration for %s because "
+                "this runtime does not expose register_replacement.",
+                self.__class__.__name__,
+            )
 
         # Mark this pattern as registered
         _registered_patterns.add(pattern_id)

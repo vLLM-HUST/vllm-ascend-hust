@@ -21,6 +21,7 @@
 #include <ATen/core/Formatting.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
+#include "aclnn/acl_meta.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
@@ -55,14 +56,21 @@
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 namespace vllm_ascend {
 
@@ -80,6 +88,96 @@ std::mutex& get_device_print_mutex()
 {
     static std::mutex device_print_mutex;
     return device_print_mutex;
+}
+
+std::mutex& get_sparse_marker_mutex()
+{
+    static std::mutex sparse_marker_mutex;
+    return sparse_marker_mutex;
+}
+
+std::set<std::string>& get_sparse_marker_ops()
+{
+    static std::set<std::string> sparse_marker_ops;
+    return sparse_marker_ops;
+}
+
+std::string tensor_shape_json(const at::Tensor& tensor)
+{
+    std::ostringstream stream;
+    stream << "[";
+    for (int64_t idx = 0; idx < tensor.dim(); ++idx) {
+        if (idx != 0) {
+            stream << ",";
+        }
+        stream << tensor.size(idx);
+    }
+    stream << "]";
+    return stream.str();
+}
+
+void write_sparse_marker_payload(const char* marker_path, const char* op_name,
+                                 const std::string& x_shape,
+                                 const std::string& weight_t_shape,
+                                 const std::string& threshold_shape,
+                                 int64_t threshold_numel, bool inclusive)
+{
+    if (marker_path == nullptr || marker_path[0] == '\0') {
+        return;
+    }
+    std::ofstream marker_file(marker_path, std::ios::app);
+    if (!marker_file.is_open()) {
+        return;
+    }
+    marker_file << "{"
+                << "\"inclusive\":" << (inclusive ? "true" : "false") << ","
+                << "\"op\":\"" << op_name << "\","
+                << "\"pid\":" << static_cast<long long>(getpid()) << ","
+                << "\"source\":\"ascend_cpp_custom_op\","
+                << "\"threshold_numel\":" << threshold_numel << ","
+                << "\"threshold_provided\":true,"
+                << "\"threshold_shape\":" << threshold_shape << ","
+                << "\"weight_t_provided\":true,"
+                << "\"weight_t_shape\":" << weight_t_shape << ","
+                << "\"x_provided\":true,"
+                << "\"x_shape\":" << x_shape
+                << "}\n";
+}
+
+void record_sparse_custom_op_marker_payload(
+    const char* op_name, const std::string& x_shape,
+    const std::string& weight_t_shape, const std::string& threshold_shape,
+    int64_t threshold_numel, bool inclusive)
+{
+    const char* ascend_marker_path =
+        std::getenv("VLLM_ASCEND_SPARSE_LINEAR_MARKER_PATH");
+    const char* sparse_marker_path =
+        std::getenv("VLLM_SPARSE_GEMV_MARKER_PATH");
+    if ((ascend_marker_path == nullptr || ascend_marker_path[0] == '\0') &&
+        (sparse_marker_path == nullptr || sparse_marker_path[0] == '\0')) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(get_sparse_marker_mutex());
+    if (!get_sparse_marker_ops().insert(op_name).second) {
+        return;
+    }
+    write_sparse_marker_payload(ascend_marker_path, op_name, x_shape,
+                                weight_t_shape, threshold_shape,
+                                threshold_numel, inclusive);
+    write_sparse_marker_payload(sparse_marker_path, op_name, x_shape,
+                                weight_t_shape, threshold_shape,
+                                threshold_numel, inclusive);
+}
+
+void record_sparse_custom_op_marker(const char* op_name, const at::Tensor& x,
+                                    const at::Tensor& weight_t,
+                                    const at::Tensor& threshold,
+                                    bool inclusive)
+{
+    record_sparse_custom_op_marker_payload(
+        op_name, tensor_shape_json(x), tensor_shape_json(weight_t),
+        tensor_shape_json(threshold), threshold.numel(), inclusive);
 }
 
 void device_print_callback(void* args)
@@ -314,6 +412,67 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     } else {
         return AscendType::FP16;
     }
+}
+
+bool is_activation_sparse_dtype(at::ScalarType scalar_type)
+{
+    return scalar_type == torch::kHalf || scalar_type == torch::kBFloat16;
+}
+
+uint32_t get_sparse_launch_block_dim(const char* env_name,
+                                     uint32_t fallback,
+                                     uint32_t max_work_items)
+{
+    const char* value = std::getenv(env_name);
+    if (value == nullptr || value[0] == '\0') {
+        value = std::getenv("VLLM_ASCEND_SPARSE_BLOCK_DIM");
+    }
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value, &end, 10);
+    TORCH_CHECK(end != value && *end == '\0' && parsed > 0,
+                env_name, " must be a positive integer, got: ", value);
+    TORCH_CHECK(parsed <= std::numeric_limits<uint32_t>::max(),
+                env_name, " is too large: ", value);
+    uint32_t requested = static_cast<uint32_t>(parsed);
+    return std::max<uint32_t>(1, std::min(requested, max_work_items));
+}
+
+uint32_t get_sparse_vector_block_dim(uint32_t max_work_items)
+{
+    int device_id = 0;
+    int64_t aiv_num = 0;
+    TORCH_CHECK(aclrtGetDevice(&device_id) == ACL_SUCCESS);
+    TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM,
+                                       &aiv_num) == ACL_SUCCESS);
+    return std::max<uint32_t>(
+        1,
+        std::min<uint32_t>(
+            static_cast<uint32_t>(aiv_num),
+            max_work_items));
+}
+
+uint32_t get_sparse_output_tile(const char* env_name, uint32_t fallback)
+{
+    constexpr uint32_t max_output_tile = 1024;
+    const char* value = std::getenv(env_name);
+    if (value == nullptr || value[0] == '\0') {
+        value = std::getenv("VLLM_ASCEND_SPARSE_OUTPUT_TILE");
+    }
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value, &end, 10);
+    TORCH_CHECK(end != value && *end == '\0' && parsed > 0,
+                env_name, " must be a positive integer, got: ", value);
+    TORCH_CHECK(parsed <= max_output_tile,
+                env_name, " must be <= ", max_output_tile, ", got: ", value);
+    return static_cast<uint32_t>(parsed);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
@@ -593,6 +752,552 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     return y_out;
 }
 #endif
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> activation_sparse_pack(
+    const at::Tensor& x,
+    const at::Tensor& threshold,
+    bool inclusive)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_pack only supports fp16 and bf16");
+    TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
+                "activation_sparse_pack threshold must be float32");
+    TORCH_CHECK(x.dim() == 2, "activation_sparse_pack x should be [batch, hidden_in]");
+    TORCH_CHECK(x.is_contiguous(), "activation_sparse_pack x must be contiguous");
+    TORCH_CHECK(threshold.is_contiguous(),
+                "activation_sparse_pack threshold must be contiguous");
+    TORCH_CHECK(threshold.numel() == 1 || threshold.numel() == x.size(0),
+                "activation_sparse_pack threshold must be scalar or [batch]");
+
+    at::Tensor values = at::empty_like(x);
+    at::Tensor indices = at::empty({x.size(0), x.size(1)},
+                                  at::dtype(at::kInt).device(x.device()));
+    at::Tensor counts = at::empty({x.size(0)},
+                                at::dtype(at::kInt).device(x.device()));
+    if (x.numel() == 0) {
+        return {values, indices, counts};
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    void* values_ptr = values.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* counts_ptr = counts.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    bool threshold_per_row = threshold.numel() != 1;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_pack");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, threshold_ptr,
+                          values_ptr, indices_ptr, counts_ptr, batch_size,
+                          input_dim, threshold_per_row, inclusive]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        // The current scalar AscendC implementation is correctness-first.
+        // Multi-block launch corrupts packed rows/output columns and needs
+        // a dedicated tiled kernel before it is safe to re-enable.
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_PACK_BLOCK_DIM", 1, batch_size);
+        activation_sparse_pack_impl(dtype, stream, x_ptr, threshold_ptr,
+                                    values_ptr, indices_ptr, counts_ptr,
+                                    batch_size, input_dim, block_dim,
+                                    threshold_per_row, inclusive);
+        return 0;
+    });
+    cmd.Run();
+    return {values, indices, counts};
+}
+
+at::Tensor activation_sparse_topk_threshold(const at::Tensor& x,
+                                             int64_t keep)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_topk_threshold only supports fp16 and bf16");
+    TORCH_CHECK(x.dim() == 2,
+                "activation_sparse_topk_threshold x should be [batch, hidden_in]");
+    TORCH_CHECK(x.size(0) == 1,
+                "activation_sparse_topk_threshold only supports batch size 1");
+    TORCH_CHECK(x.is_contiguous(),
+                "activation_sparse_topk_threshold x must be contiguous");
+    TORCH_CHECK(keep > 0 && keep <= x.size(1),
+                "activation_sparse_topk_threshold keep must be in [1, ",
+                x.size(1), "], got ", keep);
+
+    at::Tensor threshold = at::empty(
+        {x.size(0)}, x.options().dtype(at::kFloat));
+    if (x.numel() == 0) {
+        return threshold;
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    uint32_t keep_u32 = static_cast<uint32_t>(keep);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_topk_threshold");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, threshold_ptr,
+                          batch_size, input_dim, keep_u32]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        constexpr uint32_t block_dim = 1;
+        activation_sparse_topk_threshold_impl(
+            dtype, stream, x_ptr, threshold_ptr, batch_size, input_dim,
+            keep_u32, block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return threshold;
+}
+
+at::Tensor activation_sparse_linear_packed(const at::Tensor& values,
+                                           const at::Tensor& indices,
+                                           const at::Tensor& counts,
+                                           const at::Tensor& weight)
+{
+    at::ScalarType scalar_type = values.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_packed only supports fp16 and bf16");
+    TORCH_CHECK(weight.scalar_type() == scalar_type,
+                "activation_sparse_linear_packed requires values and weight to have the same dtype");
+    TORCH_CHECK(indices.scalar_type() == at::kInt,
+                "activation_sparse_linear_packed indices must be int32");
+    TORCH_CHECK(counts.scalar_type() == at::kInt,
+                "activation_sparse_linear_packed counts must be int32");
+    TORCH_CHECK(values.dim() == 2,
+                "activation_sparse_linear_packed values should be [batch, max_nnz]");
+    TORCH_CHECK(indices.sizes() == values.sizes(),
+                "activation_sparse_linear_packed indices shape must match values");
+    TORCH_CHECK(counts.dim() == 1 && counts.size(0) == values.size(0),
+                "activation_sparse_linear_packed counts should be [batch]");
+    TORCH_CHECK(weight.dim() == 2,
+                "activation_sparse_linear_packed weight should be [hidden_out, hidden_in]");
+    TORCH_CHECK(values.size(1) == weight.size(1),
+                "activation_sparse_linear_packed values max_nnz must equal weight hidden dim");
+    TORCH_CHECK(values.is_contiguous(),
+                "activation_sparse_linear_packed values must be contiguous");
+    TORCH_CHECK(indices.is_contiguous(),
+                "activation_sparse_linear_packed indices must be contiguous");
+    TORCH_CHECK(counts.is_contiguous(),
+                "activation_sparse_linear_packed counts must be contiguous");
+    TORCH_CHECK(weight.is_contiguous(),
+                "activation_sparse_linear_packed weight must be contiguous ND layout");
+
+    at::Tensor y = at::empty({values.size(0), weight.size(0)}, values.options());
+    if (values.numel() == 0 || weight.numel() == 0) {
+        return y;
+    }
+
+    void* values_ptr = values.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* counts_ptr = counts.data_ptr();
+    void* weight_ptr = weight.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(values.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(values.size(1));
+    uint32_t output_dim = static_cast<uint32_t>(weight.size(0));
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_linear_packed");
+    cmd.SetCustomHandler([scalar_type, stream, values_ptr, indices_ptr,
+                          counts_ptr, weight_ptr, y_ptr, batch_size,
+                          input_dim, output_dim]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t work_items = batch_size * output_dim;
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_PACKED_BLOCK_DIM", 1, work_items);
+        activation_sparse_linear_packed_impl(dtype, stream, values_ptr,
+                                             indices_ptr, counts_ptr,
+                                             weight_ptr, y_ptr, batch_size,
+                                             input_dim, output_dim, block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor activation_sparse_linear_packed_t(const at::Tensor& values,
+                                             const at::Tensor& indices,
+                                             const at::Tensor& counts,
+                                             const at::Tensor& weight_t)
+{
+    at::ScalarType scalar_type = values.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_packed_t only supports fp16 and bf16");
+    TORCH_CHECK(weight_t.scalar_type() == scalar_type,
+                "activation_sparse_linear_packed_t requires values and weight_t to have the same dtype");
+    TORCH_CHECK(indices.scalar_type() == at::kInt,
+                "activation_sparse_linear_packed_t indices must be int32");
+    TORCH_CHECK(counts.scalar_type() == at::kInt,
+                "activation_sparse_linear_packed_t counts must be int32");
+    TORCH_CHECK(values.dim() == 2,
+                "activation_sparse_linear_packed_t values should be [batch, max_nnz]");
+    TORCH_CHECK(indices.sizes() == values.sizes(),
+                "activation_sparse_linear_packed_t indices shape must match values");
+    TORCH_CHECK(counts.dim() == 1 && counts.size(0) == values.size(0),
+                "activation_sparse_linear_packed_t counts should be [batch]");
+    TORCH_CHECK(weight_t.dim() == 2,
+                "activation_sparse_linear_packed_t weight_t should be [hidden_in, hidden_out]");
+    TORCH_CHECK(values.size(1) == weight_t.size(0),
+                "activation_sparse_linear_packed_t values max_nnz must equal weight_t hidden dim");
+    TORCH_CHECK(values.is_contiguous(),
+                "activation_sparse_linear_packed_t values must be contiguous");
+    TORCH_CHECK(indices.is_contiguous(),
+                "activation_sparse_linear_packed_t indices must be contiguous");
+    TORCH_CHECK(counts.is_contiguous(),
+                "activation_sparse_linear_packed_t counts must be contiguous");
+    TORCH_CHECK(weight_t.is_contiguous(),
+                "activation_sparse_linear_packed_t weight_t must be contiguous ND layout");
+
+    at::Tensor y = at::empty({values.size(0), weight_t.size(1)}, values.options());
+    if (values.numel() == 0 || weight_t.numel() == 0) {
+        return y;
+    }
+
+    void* values_ptr = values.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* counts_ptr = counts.data_ptr();
+    void* weight_t_ptr = weight_t.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(values.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(values.size(1));
+    uint32_t output_dim = static_cast<uint32_t>(weight_t.size(1));
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_linear_packed_t");
+    cmd.SetCustomHandler([scalar_type, stream, values_ptr, indices_ptr,
+                          counts_ptr, weight_t_ptr, y_ptr, batch_size,
+                          input_dim, output_dim]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t output_tile = get_sparse_output_tile(
+            "VLLM_ASCEND_SPARSE_PACKED_T_OUTPUT_TILE", 1024);
+        uint32_t tile_count = (output_dim + output_tile - 1) / output_tile;
+        uint32_t work_items = batch_size * tile_count;
+        uint32_t default_block_dim = get_sparse_vector_block_dim(work_items);
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_PACKED_T_BLOCK_DIM",
+            default_block_dim,
+            work_items);
+        activation_sparse_linear_packed_t_impl(dtype, stream, values_ptr,
+                                               indices_ptr, counts_ptr,
+                                               weight_t_ptr, y_ptr, batch_size,
+                                               input_dim, output_dim, block_dim,
+                                               output_tile);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor activation_sparse_silu_and_mul_packed_t(const at::Tensor& values,
+                                                   const at::Tensor& indices,
+                                                   const at::Tensor& counts,
+                                                   const at::Tensor& weight_t)
+{
+    at::ScalarType scalar_type = values.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_silu_and_mul_packed_t only supports fp16 and bf16");
+    TORCH_CHECK(weight_t.scalar_type() == scalar_type,
+                "activation_sparse_silu_and_mul_packed_t requires values and weight_t to have the same dtype");
+    TORCH_CHECK(indices.scalar_type() == at::kInt,
+                "activation_sparse_silu_and_mul_packed_t indices must be int32");
+    TORCH_CHECK(counts.scalar_type() == at::kInt,
+                "activation_sparse_silu_and_mul_packed_t counts must be int32");
+    TORCH_CHECK(values.dim() == 2,
+                "activation_sparse_silu_and_mul_packed_t values should be [batch, max_nnz]");
+    TORCH_CHECK(indices.sizes() == values.sizes(),
+                "activation_sparse_silu_and_mul_packed_t indices shape must match values");
+    TORCH_CHECK(counts.dim() == 1 && counts.size(0) == values.size(0),
+                "activation_sparse_silu_and_mul_packed_t counts should be [batch]");
+    TORCH_CHECK(weight_t.dim() == 2,
+                "activation_sparse_silu_and_mul_packed_t weight_t should be [hidden_in, 2 * intermediate]");
+    TORCH_CHECK(weight_t.size(1) % 2 == 0,
+                "activation_sparse_silu_and_mul_packed_t weight_t output dim must be even");
+    TORCH_CHECK(values.size(1) == weight_t.size(0),
+                "activation_sparse_silu_and_mul_packed_t values max_nnz must equal weight_t hidden dim");
+    TORCH_CHECK(values.is_contiguous(),
+                "activation_sparse_silu_and_mul_packed_t values must be contiguous");
+    TORCH_CHECK(indices.is_contiguous(),
+                "activation_sparse_silu_and_mul_packed_t indices must be contiguous");
+    TORCH_CHECK(counts.is_contiguous(),
+                "activation_sparse_silu_and_mul_packed_t counts must be contiguous");
+    TORCH_CHECK(weight_t.is_contiguous(),
+                "activation_sparse_silu_and_mul_packed_t weight_t must be contiguous ND layout");
+
+    int64_t intermediate_dim_i64 = weight_t.size(1) / 2;
+    at::Tensor y = at::empty({values.size(0), intermediate_dim_i64},
+                             values.options());
+    if (values.numel() == 0 || weight_t.numel() == 0) {
+        return y;
+    }
+
+    void* values_ptr = values.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* counts_ptr = counts.data_ptr();
+    void* weight_t_ptr = weight_t.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(values.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(values.size(1));
+    uint32_t intermediate_dim = static_cast<uint32_t>(intermediate_dim_i64);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_silu_and_mul_packed_t");
+    cmd.SetCustomHandler([scalar_type, stream, values_ptr, indices_ptr,
+                          counts_ptr, weight_t_ptr, y_ptr, batch_size,
+                          input_dim, intermediate_dim]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t output_tile = get_sparse_output_tile(
+            "VLLM_ASCEND_SPARSE_SILU_PACKED_T_OUTPUT_TILE", 512);
+        uint32_t tile_count =
+            (intermediate_dim + output_tile - 1) / output_tile;
+        uint32_t work_items = batch_size * tile_count;
+        uint32_t default_block_dim = get_sparse_vector_block_dim(work_items);
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_SILU_PACKED_T_BLOCK_DIM",
+            default_block_dim,
+            work_items);
+        activation_sparse_silu_and_mul_packed_t_impl(
+            dtype, stream, values_ptr, indices_ptr, counts_ptr, weight_t_ptr,
+            y_ptr, batch_size, input_dim, intermediate_dim, block_dim,
+            output_tile);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor activation_sparse_linear_direct_t(const at::Tensor& x,
+                                             const at::Tensor& weight_t,
+                                             const at::Tensor& threshold,
+                                             bool inclusive)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_direct_t only supports fp16 and bf16");
+    TORCH_CHECK(weight_t.scalar_type() == scalar_type,
+                "activation_sparse_linear_direct_t requires x and weight_t to have the same dtype");
+    TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
+                "activation_sparse_linear_direct_t threshold must be float32");
+    TORCH_CHECK(x.dim() == 2,
+                "activation_sparse_linear_direct_t x should be [batch, hidden_in]");
+    TORCH_CHECK(weight_t.dim() == 2,
+                "activation_sparse_linear_direct_t weight_t should be [hidden_in, hidden_out]");
+    TORCH_CHECK(x.size(1) == weight_t.size(0),
+                "activation_sparse_linear_direct_t hidden dim mismatch: x hidden ",
+                x.size(1), " vs weight_t hidden ", weight_t.size(0));
+    TORCH_CHECK(x.is_contiguous(),
+                "activation_sparse_linear_direct_t x must be contiguous");
+    TORCH_CHECK(weight_t.is_contiguous(),
+                "activation_sparse_linear_direct_t weight_t must be contiguous ND layout");
+    TORCH_CHECK(threshold.is_contiguous(),
+                "activation_sparse_linear_direct_t threshold must be contiguous");
+    TORCH_CHECK(threshold.numel() == 1 || threshold.numel() == x.size(0),
+                "activation_sparse_linear_direct_t threshold must be scalar or [batch]");
+
+    at::Tensor y = at::empty({x.size(0), weight_t.size(1)}, x.options());
+    if (x.numel() == 0 || weight_t.numel() == 0) {
+        return y;
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* weight_t_ptr = weight_t.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    uint32_t output_dim = static_cast<uint32_t>(weight_t.size(1));
+    bool threshold_per_row = threshold.numel() != 1;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    std::string marker_x_shape = tensor_shape_json(x);
+    std::string marker_weight_t_shape = tensor_shape_json(weight_t);
+    std::string marker_threshold_shape = tensor_shape_json(threshold);
+    int64_t marker_threshold_numel = threshold.numel();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_linear_direct_t");
+    record_sparse_custom_op_marker("activation_sparse_linear_direct_t", x,
+                                   weight_t, threshold, inclusive);
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_t_ptr,
+                          threshold_ptr, y_ptr, batch_size, input_dim,
+                          output_dim, threshold_per_row, inclusive,
+                          marker_x_shape, marker_weight_t_shape,
+                          marker_threshold_shape,
+                          marker_threshold_numel]() -> int {
+        record_sparse_custom_op_marker_payload(
+            "activation_sparse_linear_direct_t", marker_x_shape,
+            marker_weight_t_shape, marker_threshold_shape,
+            marker_threshold_numel, inclusive);
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t output_tile = get_sparse_output_tile(
+            "VLLM_ASCEND_SPARSE_DIRECT_T_OUTPUT_TILE", 1024);
+        uint32_t tile_count = (output_dim + output_tile - 1) / output_tile;
+        uint32_t work_items = batch_size * tile_count;
+        uint32_t default_block_dim = get_sparse_vector_block_dim(work_items);
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_DIRECT_T_BLOCK_DIM",
+            default_block_dim,
+            work_items);
+        activation_sparse_linear_direct_t_impl(
+            dtype, stream, x_ptr, weight_t_ptr, threshold_ptr, y_ptr,
+            batch_size, input_dim, output_dim, threshold_per_row, inclusive,
+            block_dim, output_tile);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor activation_sparse_silu_and_mul_direct_t(const at::Tensor& x,
+                                                   const at::Tensor& weight_t,
+                                                   const at::Tensor& threshold,
+                                                   bool inclusive)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_silu_and_mul_direct_t only supports fp16 and bf16");
+    TORCH_CHECK(weight_t.scalar_type() == scalar_type,
+                "activation_sparse_silu_and_mul_direct_t requires x and weight_t to have the same dtype");
+    TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
+                "activation_sparse_silu_and_mul_direct_t threshold must be float32");
+    TORCH_CHECK(x.dim() == 2,
+                "activation_sparse_silu_and_mul_direct_t x should be [batch, hidden_in]");
+    TORCH_CHECK(weight_t.dim() == 2,
+                "activation_sparse_silu_and_mul_direct_t weight_t should be [hidden_in, 2 * intermediate]");
+    TORCH_CHECK(weight_t.size(1) % 2 == 0,
+                "activation_sparse_silu_and_mul_direct_t weight_t output dim must be even");
+    TORCH_CHECK(x.size(1) == weight_t.size(0),
+                "activation_sparse_silu_and_mul_direct_t hidden dim mismatch: x hidden ",
+                x.size(1), " vs weight_t hidden ", weight_t.size(0));
+    TORCH_CHECK(x.is_contiguous(),
+                "activation_sparse_silu_and_mul_direct_t x must be contiguous");
+    TORCH_CHECK(weight_t.is_contiguous(),
+                "activation_sparse_silu_and_mul_direct_t weight_t must be contiguous ND layout");
+    TORCH_CHECK(threshold.is_contiguous(),
+                "activation_sparse_silu_and_mul_direct_t threshold must be contiguous");
+    TORCH_CHECK(threshold.numel() == 1 || threshold.numel() == x.size(0),
+                "activation_sparse_silu_and_mul_direct_t threshold must be scalar or [batch]");
+
+    int64_t intermediate_dim_i64 = weight_t.size(1) / 2;
+    at::Tensor y = at::empty({x.size(0), intermediate_dim_i64}, x.options());
+    if (x.numel() == 0 || weight_t.numel() == 0) {
+        return y;
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* weight_t_ptr = weight_t.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    uint32_t intermediate_dim = static_cast<uint32_t>(intermediate_dim_i64);
+    bool threshold_per_row = threshold.numel() != 1;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    std::string marker_x_shape = tensor_shape_json(x);
+    std::string marker_weight_t_shape = tensor_shape_json(weight_t);
+    std::string marker_threshold_shape = tensor_shape_json(threshold);
+    int64_t marker_threshold_numel = threshold.numel();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_silu_and_mul_direct_t");
+    record_sparse_custom_op_marker("activation_sparse_silu_and_mul_direct_t", x,
+                                   weight_t, threshold, inclusive);
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_t_ptr,
+                          threshold_ptr, y_ptr, batch_size, input_dim,
+                          intermediate_dim, threshold_per_row,
+                          inclusive, marker_x_shape, marker_weight_t_shape,
+                          marker_threshold_shape,
+                          marker_threshold_numel]() -> int {
+        record_sparse_custom_op_marker_payload(
+            "activation_sparse_silu_and_mul_direct_t", marker_x_shape,
+            marker_weight_t_shape, marker_threshold_shape,
+            marker_threshold_numel, inclusive);
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t output_tile = get_sparse_output_tile(
+            "VLLM_ASCEND_SPARSE_SILU_DIRECT_T_OUTPUT_TILE", 512);
+        uint32_t tile_count =
+            (intermediate_dim + output_tile - 1) / output_tile;
+        uint32_t work_items = batch_size * tile_count;
+        uint32_t default_block_dim = get_sparse_vector_block_dim(work_items);
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_SILU_DIRECT_T_BLOCK_DIM",
+            default_block_dim,
+            work_items);
+        activation_sparse_silu_and_mul_direct_t_impl(
+            dtype, stream, x_ptr, weight_t_ptr, threshold_ptr, y_ptr,
+            batch_size, input_dim, intermediate_dim, threshold_per_row,
+            inclusive, block_dim, output_tile);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor activation_sparse_linear(const at::Tensor& x,
+                                    const at::Tensor& weight,
+                                    const at::Tensor& threshold,
+                                    bool inclusive)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear only supports fp16 and bf16");
+    TORCH_CHECK(weight.scalar_type() == scalar_type,
+                "activation_sparse_linear requires x and weight to have the same dtype");
+    TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
+                "activation_sparse_linear threshold must be float32");
+    TORCH_CHECK(x.dim() == 2, "activation_sparse_linear x should be [batch, hidden_in]");
+    TORCH_CHECK(weight.dim() == 2,
+                "activation_sparse_linear weight should be [hidden_out, hidden_in]");
+    TORCH_CHECK(x.size(1) == weight.size(1),
+                "activation_sparse_linear hidden dim mismatch: x hidden ",
+                x.size(1), " vs weight hidden ", weight.size(1));
+    TORCH_CHECK(x.is_contiguous(), "activation_sparse_linear x must be contiguous");
+    TORCH_CHECK(weight.is_contiguous(),
+                "activation_sparse_linear weight must be contiguous ND layout");
+    TORCH_CHECK(threshold.is_contiguous(),
+                "activation_sparse_linear threshold must be contiguous");
+    TORCH_CHECK(threshold.numel() == 1 || threshold.numel() == x.size(0),
+                "activation_sparse_linear threshold must be scalar or [batch]");
+
+    at::Tensor y = at::empty({x.size(0), weight.size(0)}, x.options());
+    if (x.numel() == 0 || weight.numel() == 0) {
+        return y;
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* weight_ptr = weight.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    void* y_ptr = y.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    uint32_t output_dim = static_cast<uint32_t>(weight.size(0));
+    bool threshold_per_row = threshold.numel() != 1;
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_linear");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, threshold_ptr,
+                          y_ptr, batch_size, input_dim, output_dim,
+                          threshold_per_row, inclusive]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        uint32_t work_items = batch_size * output_dim;
+        uint32_t block_dim = get_sparse_launch_block_dim(
+            "VLLM_ASCEND_SPARSE_DIRECT_BLOCK_DIM", 1, work_items);
+        activation_sparse_linear_impl(dtype, stream, x_ptr, weight_ptr,
+                                      threshold_ptr, y_ptr, batch_size,
+                                      input_dim, output_dim, threshold_per_row,
+                                      inclusive, block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
 
 at::Tensor convert_hamming_dist_top_k_output(const at::Tensor &hashq,
                                              const at::Tensor &hashkCache,
@@ -2305,6 +3010,30 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
+
+    ops.def("activation_sparse_pack(Tensor x, Tensor threshold, bool inclusive=False) -> (Tensor values, Tensor indices, Tensor counts)");
+    ops.impl("activation_sparse_pack", torch::kPrivateUse1, &vllm_ascend::activation_sparse_pack);
+
+    ops.def("activation_sparse_topk_threshold(Tensor x, int keep) -> Tensor");
+    ops.impl("activation_sparse_topk_threshold", torch::kPrivateUse1, &vllm_ascend::activation_sparse_topk_threshold);
+
+    ops.def("activation_sparse_linear_packed(Tensor values, Tensor indices, Tensor counts, Tensor weight) -> Tensor");
+    ops.impl("activation_sparse_linear_packed", torch::kPrivateUse1, &vllm_ascend::activation_sparse_linear_packed);
+
+    ops.def("activation_sparse_linear_packed_t(Tensor values, Tensor indices, Tensor counts, Tensor weight_t) -> Tensor");
+    ops.impl("activation_sparse_linear_packed_t", torch::kPrivateUse1, &vllm_ascend::activation_sparse_linear_packed_t);
+
+    ops.def("activation_sparse_silu_and_mul_packed_t(Tensor values, Tensor indices, Tensor counts, Tensor weight_t) -> Tensor");
+    ops.impl("activation_sparse_silu_and_mul_packed_t", torch::kPrivateUse1, &vllm_ascend::activation_sparse_silu_and_mul_packed_t);
+
+    ops.def("activation_sparse_linear_direct_t(Tensor x, Tensor weight_t, Tensor threshold, bool inclusive=False) -> Tensor");
+    ops.impl("activation_sparse_linear_direct_t", torch::kPrivateUse1, &vllm_ascend::activation_sparse_linear_direct_t);
+
+    ops.def("activation_sparse_silu_and_mul_direct_t(Tensor x, Tensor weight_t, Tensor threshold, bool inclusive=False) -> Tensor");
+    ops.impl("activation_sparse_silu_and_mul_direct_t", torch::kPrivateUse1, &vllm_ascend::activation_sparse_silu_and_mul_direct_t);
+
+    ops.def("activation_sparse_linear(Tensor x, Tensor weight, Tensor threshold, bool inclusive=False) -> Tensor");
+    ops.impl("activation_sparse_linear", torch::kPrivateUse1, &vllm_ascend::activation_sparse_linear);
 
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"

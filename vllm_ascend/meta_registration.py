@@ -88,7 +88,118 @@ def sgmv_expand_meta(
     return y_out
 
 
+def activation_sparse_pack_meta(
+    x: torch.Tensor,
+    threshold: torch.Tensor,
+    inclusive: bool = False,
+):
+    del threshold, inclusive
+    values = torch.empty_like(x)
+    indices = torch.empty(x.shape, dtype=torch.int32, device=x.device)
+    counts = torch.empty((x.shape[0],), dtype=torch.int32, device=x.device)
+    return values, indices, counts
+
+
+def activation_sparse_linear_meta(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    threshold: torch.Tensor,
+    inclusive: bool = False,
+):
+    del threshold, inclusive
+    return torch.empty(
+        (x.shape[0], weight.shape[0]),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
+def activation_sparse_linear_direct_t_meta(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    threshold: torch.Tensor,
+    inclusive: bool = False,
+):
+    del threshold, inclusive
+    return torch.empty(
+        (x.shape[0], weight_t.shape[1]),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
+def activation_sparse_linear_packed_meta(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    counts: torch.Tensor,
+    weight: torch.Tensor,
+):
+    del indices, counts
+    return torch.empty(
+        (values.shape[0], weight.shape[0]),
+        dtype=values.dtype,
+        device=values.device,
+    )
+
+
+def activation_sparse_linear_packed_t_meta(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    counts: torch.Tensor,
+    weight_t: torch.Tensor,
+):
+    del indices, counts
+    return torch.empty(
+        (values.shape[0], weight_t.shape[1]),
+        dtype=values.dtype,
+        device=values.device,
+    )
+
+
+def activation_sparse_silu_and_mul_packed_t_meta(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    counts: torch.Tensor,
+    weight_t: torch.Tensor,
+):
+    del indices, counts
+    return torch.empty(
+        (values.shape[0], weight_t.shape[1] // 2),
+        dtype=values.dtype,
+        device=values.device,
+    )
+
+
+def activation_sparse_silu_and_mul_direct_t_meta(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    threshold: torch.Tensor,
+    inclusive: bool = False,
+):
+    del threshold, inclusive
+    return torch.empty(
+        (x.shape[0], weight_t.shape[1] // 2),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
 if not is_310p():
     register_meta_if_necessary("_C_ascend", "get_masked_input_and_mask", get_masked_input_and_mask_meta)
     register_meta_if_necessary("_C_ascend", "bgmv_expand", bgmv_expand_meta)
     register_meta_if_necessary("_C_ascend", "sgmv_expand", sgmv_expand_meta)
+    register_meta_if_necessary("_C_ascend", "activation_sparse_pack", activation_sparse_pack_meta)
+    register_meta_if_necessary("_C_ascend", "activation_sparse_linear", activation_sparse_linear_meta)
+    register_meta_if_necessary("_C_ascend", "activation_sparse_linear_direct_t", activation_sparse_linear_direct_t_meta)
+    register_meta_if_necessary("_C_ascend", "activation_sparse_linear_packed", activation_sparse_linear_packed_meta)
+    register_meta_if_necessary("_C_ascend", "activation_sparse_linear_packed_t", activation_sparse_linear_packed_t_meta)
+    register_meta_if_necessary(
+        "_C_ascend",
+        "activation_sparse_silu_and_mul_packed_t",
+        activation_sparse_silu_and_mul_packed_t_meta,
+    )
+    register_meta_if_necessary(
+        "_C_ascend",
+        "activation_sparse_silu_and_mul_direct_t",
+        activation_sparse_silu_and_mul_direct_t_meta,
+    )
