@@ -20,7 +20,11 @@ from types import SimpleNamespace
 import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MoEOffloadParams,
+    MoEWeights,
+    build_fused_experts_input,
+)
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -43,6 +47,28 @@ def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
 
 
 class TestMoERuntimeArgs(unittest.TestCase):
+    def test_build_fused_experts_input_preserves_offload_contract(self):
+        fused = build_fused_experts_input(
+            hidden_states=torch.randn(2, 4),
+            topk_weights=torch.randn(2, 1),
+            topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+            w1=torch.randn(2, 4, 8),
+            w2=torch.randn(2, 8, 4),
+            quant_type=QuantType.NONE,
+            dynamic_eplb=False,
+            physical_expert_count=2,
+            offload_enabled=True,
+            offload_layer_id=7,
+            offload_num_logical_experts=60,
+            offload_step_id=13,
+        )
+
+        self.assertIsInstance(fused.offload, MoEOffloadParams)
+        assert fused.offload is not None
+        self.assertEqual(fused.offload.api_version, 1)
+        self.assertEqual(fused.offload.layer_id, 7)
+        self.assertEqual(fused.routing.physical_expert_count, 2)
+
     def test_build_mlp_compute_input_preserves_situ_parameters(self):
         fused_experts_input = build_fused_experts_input(
             hidden_states=torch.randn(2, 4),

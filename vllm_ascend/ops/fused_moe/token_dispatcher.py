@@ -386,7 +386,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
-        if expert_map is not None:
+        physical_expert_count = token_dispatch_input.routing.physical_expert_count
+        if physical_expert_count is not None:
+            if expert_map is not None:
+                raise RuntimeError(
+                    "physical_expert_count requires a local non-EP expert table"
+                )
+            if physical_expert_count <= 0:
+                raise ValueError("physical_expert_count must be positive")
+            global_num_experts = int(physical_expert_count)
+            first_expert_idx = 0
+            last_expert_idx = global_num_experts
+        elif expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = expert_map[topk_ids] != -1
             topk_weights = topk_weights * mask

@@ -43,6 +43,11 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
+def get_moe_offload_runtime():
+    """Return an optional runtime injected by an external MoE plugin."""
+    return None
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
@@ -149,6 +154,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
 
+        offload_runtime = get_moe_offload_runtime()
+        offload_enabled = False
+        offload_step_id = -1
+        layer_id = int(getattr(layer, "layer_id", -1))
+        if offload_runtime is not None:
+            offload_enabled = bool(
+                offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id)
+            )
+            if offload_enabled:
+                offload_step_id = int(offload_runtime.next_step_id())
+
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
@@ -166,11 +182,22 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
+                swiglu_limit=float(getattr(layer, "swiglu_limit", 0.0) or 0.0),
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
+                offload_enabled=offload_enabled,
+                offload_layer_id=layer_id,
+                offload_num_logical_experts=get_moe_num_logical_experts(
+                    layer,
+                    layer.moe_config.num_experts,
+                    global_redundant_expert_num=layer.global_redundant_expert_num,
+                    num_shared_experts=layer.n_shared_experts or 0,
+                ),
+                offload_expected_device_type=x.device.type,
+                offload_step_id=offload_step_id,
             )
         )
         return final_hidden_states

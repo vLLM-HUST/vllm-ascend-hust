@@ -36,4 +36,7 @@ class MoeRouterInput:
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
     log2phy: torch.Tensor | None = None
+    # Slot-backed offload may expose a compact per-rank expert table. This is
+    # distinct from EP ownership in expert_map.
+    physical_expert_count: int | None = None
     pertoken_scale: torch.Tensor | None = None

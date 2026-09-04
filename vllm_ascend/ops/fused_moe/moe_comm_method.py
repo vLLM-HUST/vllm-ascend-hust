@@ -74,6 +74,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
+    swiglu_limit: float = 0.0
 
 
 class MoECommMethod(ABC):
@@ -118,6 +119,10 @@ class MoECommMethod(ABC):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        fused_experts_input = self._maybe_apply_moe_offload_plan(
+            fused_experts_input
+        )
+
         # Check constraints
         assert fused_experts_input.hidden_states.dtype in [
             torch.float32,
@@ -159,7 +164,15 @@ class MoECommMethod(ABC):
             before_combine_evt=before_combine_evt,
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
+            swiglu_limit=fused_experts_input.swiglu_limit,
         )
+
+    def _maybe_apply_moe_offload_plan(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ) -> MoEFusedExpertsInput:
+        """Stable no-op seam for an optional external offload runtime."""
+        return fused_experts_input
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)

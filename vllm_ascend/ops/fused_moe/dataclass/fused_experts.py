@@ -45,6 +45,19 @@ class MoEWeights:
 
 
 @dataclass(frozen=True, slots=True)
+class MoEOffloadParams:
+    """Versioned metadata for an external expert-offload implementation."""
+
+    api_version: int = 1
+    enabled: bool = False
+    profile_only: bool = False
+    layer_id: int = -1
+    num_logical_experts: int = -1
+    expected_device_type: str = "npu"
+    step_id: int = -1
+
+
+@dataclass(frozen=True, slots=True)
 class MoEFusedExpertsInput:
     """Top-level input for the routed experts pipeline."""
 
@@ -57,10 +70,12 @@ class MoEFusedExpertsInput:
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
+    swiglu_limit: float = 0.0
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
     lora_context: Any = None
+    offload: MoEOffloadParams | None = None
 
 
 def build_fused_experts_input(
@@ -95,6 +110,14 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     lora_context=None,
+    swiglu_limit: float = 0.0,
+    physical_expert_count: int | None = None,
+    offload_enabled: bool = False,
+    offload_layer_id: int = -1,
+    offload_num_logical_experts: int = -1,
+    offload_expected_device_type: str = "npu",
+    offload_step_id: int = -1,
+    offload_profile_only: bool = False,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -117,11 +140,13 @@ def build_fused_experts_input(
             global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            physical_expert_count=physical_expert_count,
             pertoken_scale=pertoken_scale,
         ),
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
+        swiglu_limit=swiglu_limit,
         quant=build_quant_params(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
@@ -133,4 +158,16 @@ def build_fused_experts_input(
             is_per_channel_weight=is_per_channel_weight,
         ),
         lora_context=lora_context,
+        offload=(
+            MoEOffloadParams(
+                enabled=offload_enabled,
+                profile_only=offload_profile_only,
+                layer_id=offload_layer_id,
+                num_logical_experts=offload_num_logical_experts,
+                expected_device_type=offload_expected_device_type,
+                step_id=offload_step_id,
+            )
+            if offload_enabled or offload_profile_only
+            else None
+        ),
     )
