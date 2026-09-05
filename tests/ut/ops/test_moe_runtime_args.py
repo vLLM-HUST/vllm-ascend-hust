@@ -21,9 +21,11 @@ import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MOE_OFFLOAD_API_VERSION,
     MoEOffloadParams,
     MoEWeights,
     build_fused_experts_input,
+    supports_moe_offload_api,
 )
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
@@ -47,6 +49,11 @@ def _get_test_mxfp_dtype(quant_type: QuantType) -> torch.dtype | None:
 
 
 class TestMoERuntimeArgs(unittest.TestCase):
+    def test_external_offload_api_is_explicitly_negotiable(self):
+        self.assertEqual(MOE_OFFLOAD_API_VERSION, 1)
+        self.assertTrue(supports_moe_offload_api(MOE_OFFLOAD_API_VERSION))
+        self.assertFalse(supports_moe_offload_api(MOE_OFFLOAD_API_VERSION + 1))
+
     def test_build_fused_experts_input_preserves_offload_contract(self):
         fused = build_fused_experts_input(
             hidden_states=torch.randn(2, 4),
@@ -65,7 +72,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
 
         self.assertIsInstance(fused.offload, MoEOffloadParams)
         assert fused.offload is not None
-        self.assertEqual(fused.offload.api_version, 1)
+        self.assertEqual(fused.offload.api_version, MOE_OFFLOAD_API_VERSION)
         self.assertEqual(fused.offload.layer_id, 7)
         self.assertEqual(fused.routing.physical_expert_count, 2)
 

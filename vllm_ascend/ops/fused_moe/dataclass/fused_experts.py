@@ -27,6 +27,18 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams, build_
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.quantization.quant_type import QuantType
 
+MOE_OFFLOAD_API_VERSION = 1
+
+
+def supports_moe_offload_api(api_version: int) -> bool:
+    """Return whether an external offload provider can use this metadata ABI.
+
+    Providers should negotiate this value before installing graph-time hooks;
+    a mismatch must fail closed instead of guessing at dataclass fields.
+    """
+
+    return api_version == MOE_OFFLOAD_API_VERSION
+
 
 @dataclass(frozen=True, slots=True)
 class MoEWeights:
@@ -48,7 +60,7 @@ class MoEWeights:
 class MoEOffloadParams:
     """Versioned metadata for an external expert-offload implementation."""
 
-    api_version: int = 1
+    api_version: int = MOE_OFFLOAD_API_VERSION
     enabled: bool = False
     profile_only: bool = False
     layer_id: int = -1
