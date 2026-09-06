@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from importlib import import_module
 from types import NoneType
 from typing import Any
 
@@ -178,6 +179,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self.kv_cache_compression_provider: Any = None
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -992,6 +994,55 @@ class NPUWorker(WorkerBase):
             self.kv_cache_spec = kv_cache_spec
         return kv_cache_spec
 
+    def validate_kv_cache_compression(self) -> Any:
+        """Resolve and validate the configured provider before KV allocation."""
+        config = getattr(self.vllm_config, "kv_cache_compression_config", None)
+        if config is None:
+            base_validate = getattr(super(), "validate_kv_cache_compression", None)
+            return base_validate() if base_validate is not None else None
+
+        from vllm.v1.kv_cache_compression import KVCacheCompressionCompatibility
+
+        factory = self.current_platform.get_kv_cache_compression_provider_factory()
+        if factory is None:
+            return KVCacheCompressionCompatibility(
+                schema_version=config.schema_version,
+                provider=config.provider,
+                supported=False,
+                reasons=("Ascend platform did not declare a KV cache compression provider factory",),
+                platform=self.current_platform.device_type,
+            )
+
+        try:
+            module_name, function_name = factory.split(":", 1)
+            provider_factory = getattr(import_module(module_name), function_name)
+            provider = provider_factory(config)
+        except Exception as error:
+            return KVCacheCompressionCompatibility(
+                schema_version=config.schema_version,
+                provider=config.provider,
+                supported=False,
+                reasons=(f"provider initialization failed: {type(error).__name__}: {error}",),
+                platform=self.current_platform.device_type,
+                provider_factory=factory,
+            )
+
+        try:
+            report = provider.validate_worker(config, self, factory)
+        except Exception as error:
+            return KVCacheCompressionCompatibility(
+                schema_version=config.schema_version,
+                provider=config.provider,
+                supported=False,
+                reasons=(f"provider capability inspection failed: {type(error).__name__}: {error}",),
+                platform=self.current_platform.device_type,
+                provider_factory=factory,
+            )
+
+        if report.supported:
+            self.kv_cache_compression_provider = provider
+        return report
+
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
 
@@ -1017,6 +1068,17 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            provider = self.kv_cache_compression_provider
+            if provider is not None:
+                self.model_runner.activate_kv_cache_compression_provider(provider)
+                config = self.vllm_config.kv_cache_compression_config
+                assert config is not None
+                logger.info(
+                    "Activated KV cache compression provider after KV cache "
+                    "initialization: provider=%s schema_version=%d",
+                    config.provider,
+                    config.schema_version,
+                )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the

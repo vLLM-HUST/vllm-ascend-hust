@@ -99,6 +99,10 @@ class NPUPlatform(Platform):
         "mxfp8",
     ]
 
+    @classmethod
+    def get_kv_cache_compression_provider_factory(cls) -> str | None:
+        return "vllm_ascend.kv_cache_compression.registry:get_kv_cache_compression_provider"
+
     @property
     def pass_key(self) -> str:
         """

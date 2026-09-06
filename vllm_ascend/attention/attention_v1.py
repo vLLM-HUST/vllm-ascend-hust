@@ -241,6 +241,9 @@ class AscendMetadata:
 
     pcp_local_num_input_tokens: int | None = None
 
+    # Optional provider-owned cache-write view. None on the default path.
+    kv_cache_compression_view: Any = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -435,6 +438,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
+            kv_cache_compression_view=(common_attn_metadata.kv_cache_compression_view),
             **backend_metadata,
         )
         if self.pcp_enabled:
@@ -1815,7 +1819,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output_padded = None
         if key is not None and value is not None:
             output_padded = output
-            if self.pcp_enabled:
+            compression_view = attn_metadata.kv_cache_compression_view
+            skip_default_cache_write = False
+            if compression_view is not None:
+                skip_default_cache_write = compression_view.before_cache_write(
+                    layer=layer,
+                    backend=self,
+                    query=query,
+                    key=key,
+                    value=value,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                )
+            if skip_default_cache_write:
+                pass
+            elif self.pcp_enabled:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
                     query, key, value, kv_cache, attn_metadata, output
                 )
