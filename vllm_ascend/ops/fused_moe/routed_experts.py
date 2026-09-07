@@ -143,9 +143,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         offload_step_id = -1
         layer_id = int(getattr(layer, "layer_id", -1))
         if offload_runtime is not None:
-            offload_enabled = bool(
-                offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id)
-            )
+            offload_enabled = bool(offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id))
             if offload_enabled:
                 offload_step_id = int(offload_runtime.next_step_id())
 

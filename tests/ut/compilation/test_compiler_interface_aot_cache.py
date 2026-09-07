@@ -29,10 +29,13 @@ def test_npugraph_ex_aot_cache_settings_are_scoped():
         "enable_autograd_cache": functorch_config.enable_autograd_cache,
     }
 
-    with dynamo_config.patch(caching_precompile=True), functorch_config.patch(
-        bundled_autograd_cache=True,
-        force_autograd_cache=True,
-        enable_autograd_cache=True,
+    with (
+        dynamo_config.patch(caching_precompile=True),
+        functorch_config.patch(
+            bundled_autograd_cache=True,
+            force_autograd_cache=True,
+            enable_autograd_cache=True,
+        ),
     ):
         with _disable_pytorch_aot_cache_for_npugraph_ex():
             assert dynamo_config.caching_precompile is False

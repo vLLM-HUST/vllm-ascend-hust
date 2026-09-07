@@ -9,7 +9,6 @@ from types import ModuleType
 
 from packaging.version import InvalidVersion, Version
 
-
 _REAL_GLUON_MIN_VERSION = Version("3.6")
 
 

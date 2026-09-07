@@ -42,9 +42,11 @@ jobs:
             exit 1
           fi
           upstream_branch="$(gh api "repos/${upstream_repo}" --jq '.default_branch')"
-          echo "repository=$upstream_repo" >> "$GITHUB_OUTPUT"
-          echo "branch=$upstream_branch" >> "$GITHUB_OUTPUT"
-          echo "target=$branch" >> "$GITHUB_OUTPUT"
+          {
+            echo "repository=$upstream_repo"
+            echo "branch=$upstream_branch"
+            echo "target=$branch"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create repository-scoped sync token
         id: app-token
@@ -73,9 +75,11 @@ jobs:
           fi
           before="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_BRANCH}" --jq '.sha')"
           upstream="$(gh api "repos/${UPSTREAM_REPOSITORY}/commits/${UPSTREAM_BRANCH}" --jq '.sha')"
+          # shellcheck disable=SC2016
           printf 'Target before: `%s`\nUpstream observed: `%s`\n' "$before" "$upstream" >> "$GITHUB_STEP_SUMMARY"
           relation="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${upstream}...${before}" --jq '.status')"
           if [[ "$relation" == ahead || "$relation" == identical ]]; then
+            # shellcheck disable=SC2016
             printf '\nNo-op: target `%s` already contains the observed upstream commit; no write requested.\n' "$before" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -108,6 +112,7 @@ jobs:
             echo "Already contains the observed upstream commit (HTTP 204)." >> "$GITHUB_STEP_SUMMARY"
             merged="$before"
           fi
+          # shellcheck disable=SC2016
           printf '\nMerge response SHA: `%s`\n' "$merged" >> "$GITHUB_STEP_SUMMARY"
           # Branch reads can briefly lag a successful merge. Retry reads, never
           # the mutation, and still fail closed if ancestry does not converge.
@@ -133,6 +138,7 @@ jobs:
             echo "::error::Post-merge ancestry verification failed for $ancestor ($status); branch $after, merge $merged."
             exit 1
           fi
+          # shellcheck disable=SC2016
           printf '\nTarget after: `%s`\nBoth previous fork HEAD and observed upstream HEAD are ancestors.\n' "$after" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create or update failure issue
@@ -153,6 +159,7 @@ jobs:
           body="$(mktemp)"
           stored="$(mktemp)"
           trap 'rm -f "$body" "$stored"' EXIT
+          # shellcheck disable=SC2016
           printf 'Daily synchronization from `%s:%s` into `%s:%s` failed.\n\nFailure class: **%s**\n\nRun: %s\n\nSee the run summary for exact source SHAs and diagnosis. Workflow updates require a dedicated App/Token with Contents and Workflows write access. Conflicts must be resolved without discarding fork-only commits.\n' \
             "${UPSTREAM_REPOSITORY:-unknown}" "${UPSTREAM_BRANCH:-unknown}" \
             "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$FAILURE_KIND" "$run_url" > "$body"
