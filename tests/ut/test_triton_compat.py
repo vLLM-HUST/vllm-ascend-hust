@@ -7,7 +7,6 @@ from types import ModuleType
 
 import pytest
 
-
 MODULE_PATH = Path(__file__).parents[2] / "vllm_ascend" / "_triton_compat.py"
 SPEC = importlib.util.spec_from_file_location("vllm_ascend_triton_compat_test", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None

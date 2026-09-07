@@ -11,15 +11,9 @@ def test_custom_install_honors_skip_build() -> None:
     module = ast.parse(setup_path.read_text(encoding="utf-8"))
 
     custom_install = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.ClassDef) and node.name == "custom_install"
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "custom_install"
     )
-    run_method = next(
-        node
-        for node in custom_install.body
-        if isinstance(node, ast.FunctionDef) and node.name == "run"
-    )
+    run_method = next(node for node in custom_install.body if isinstance(node, ast.FunctionDef) and node.name == "run")
     skip_build_guard = next(node for node in run_method.body if isinstance(node, ast.If))
 
     assert ast.unparse(skip_build_guard.test) == "not self.skip_build"

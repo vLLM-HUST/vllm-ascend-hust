@@ -273,8 +273,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         assert expert_map is not None
         # NOTE: quant_mode differs by quant features:
+        # - additional_config.combine_quant_mode, when non-zero, forces quant_mode
+        #   to that value regardless of quant_type
         # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
-        if comm_quant_mode is not None:
+        combine_quant_mode = get_ascend_config().combine_quant_mode
+        if combine_quant_mode:
+            quant_mode = combine_quant_mode
+        elif comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif quant_type == QuantType.W8A8MXFP:
             quant_mode = 4
@@ -387,9 +392,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         physical_expert_count = token_dispatch_input.routing.physical_expert_count
         if physical_expert_count is not None:
             if expert_map is not None:
-                raise RuntimeError(
-                    "physical_expert_count requires a local non-EP expert table"
-                )
+                raise RuntimeError("physical_expert_count requires a local non-EP expert table")
             if physical_expert_count <= 0:
                 raise ValueError("physical_expert_count must be positive")
             global_num_experts = int(physical_expert_count)

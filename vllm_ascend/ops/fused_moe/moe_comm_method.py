@@ -120,9 +120,7 @@ class MoECommMethod(ABC):
         fused_experts_input: MoEFusedExpertsInput,
         quant_method=None,
     ):
-        fused_experts_input = self._maybe_apply_moe_offload_plan(
-            fused_experts_input
-        )
+        fused_experts_input = self._maybe_apply_moe_offload_plan(fused_experts_input)
 
         # Check constraints
         assert fused_experts_input.hidden_states.dtype in [

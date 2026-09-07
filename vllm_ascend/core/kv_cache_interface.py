@@ -74,7 +74,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def storage_block_size(self) -> int:
         """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.compress_ratio
+        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -100,6 +100,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
+                spec.tokens_per_state,
             )
             for spec in specs
         }
@@ -124,7 +125,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
             compress_ratio=compress_ratio_set.pop(),
-            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

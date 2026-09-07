@@ -7,11 +7,9 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 from packaging.version import Version
-from setuptools_scm import get_version
 
 import build_version
 from build_version import resolve_trusted_scm_version, validate_source_version
-
 
 ROOT = Path(__file__).resolve().parents[2]
 

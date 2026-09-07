@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from packaging.version import InvalidVersion, Version
 from setuptools_scm import get_version
-
 
 MINIMUM_TRUSTED_SOURCE_VERSION = Version("0.23")
 
@@ -24,8 +23,7 @@ def _git_output(root: Path, *args: str) -> str:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(
-            "A complete Git checkout with synchronized upstream tags is required "
-            "to build vLLM Ascend."
+            "A complete Git checkout with synchronized upstream tags is required to build vLLM Ascend."
         ) from exc
 
 
@@ -72,7 +70,5 @@ def resolve_trusted_scm_version(
             version_options["write_to"] = write_to
         resolved = get_version(**version_options)
     except LookupError as exc:
-        raise RuntimeError(
-            "Unable to derive vLLM Ascend version from tagged Git history."
-        ) from exc
+        raise RuntimeError("Unable to derive vLLM Ascend version from tagged Git history.") from exc
     return validate_source_version(resolved)
