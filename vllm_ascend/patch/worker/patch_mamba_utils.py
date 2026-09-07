@@ -37,27 +37,30 @@ def _can_launch_triton_batch_memcpy() -> bool:
 
 def _get_mamba_groups(
     kv_cache_config: KVCacheConfig,
-) -> tuple[list[int], MambaSpec]:
-    """Find Mamba groups, including uniform worker-side group wrappers."""
-    mamba_group_ids: list[int] = []
-    mamba_specs: list[MambaSpec] = []
+) -> dict[MambaSpec, list[int]]:
+    """Return Core's current Mamba-spec to group-ID mapping.
+
+    Worker KV configs retain ``UniformTypeKVCacheSpecs`` wrappers so Ascend can
+    preserve per-layer physical layouts.  Core's helpers nevertheless require
+    the mapping contract returned by ``vllm.v1.worker.mamba_utils``; returning
+    the legacy ``(group_ids, spec)`` tuple makes callers iterate a list as if it
+    were a ``MambaSpec``.
+    """
+    mamba_groups: dict[MambaSpec, set[int]] = {}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         group_spec = group.kv_cache_spec
         if isinstance(group_spec, MambaSpec):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(group_spec)
+            mamba_groups.setdefault(group_spec, set()).add(group_id)
             continue
         if not isinstance(group_spec, UniformTypeKVCacheSpecs):
             continue
 
-        inner_specs = list(group_spec.kv_cache_specs.values())
-        if inner_specs and all(isinstance(spec, MambaSpec) for spec in inner_specs):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(inner_specs[0])
+        for inner_spec in group_spec.kv_cache_specs.values():
+            if isinstance(inner_spec, MambaSpec):
+                mamba_groups.setdefault(inner_spec, set()).add(group_id)
 
-    assert mamba_group_ids, "no mamba layers in the model"
-    assert all(mamba_specs[0] == spec for spec in mamba_specs)
-    return mamba_group_ids, mamba_specs[0]
+    assert mamba_groups, "no mamba layers in the model"
+    return {spec: sorted(group_ids) for spec, group_ids in mamba_groups.items()}
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
