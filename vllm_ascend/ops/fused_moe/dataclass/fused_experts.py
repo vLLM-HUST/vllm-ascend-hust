@@ -79,6 +79,11 @@ class MoEFusedExpertsInput:
     weights: MoEWeights
     routing: MoeRouterInput
     quant: MoEQuantParams
+    # The routed-expert layer owning the weights. The MLP stage reads the
+    # quant-method-specific weights (e.g. ``w13_weight_list``) from here, so
+    # quant methods do not need to thread every weight tensor through
+    # ``build_fused_experts_input``.
+    layer: torch.nn.Module | None = None
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
@@ -95,10 +100,11 @@ def build_fused_experts_input(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1: torch.Tensor | list[torch.Tensor],
-    w2: torch.Tensor | list[torch.Tensor],
+    layer=None,
     quant_type: QuantType,
     dynamic_eplb: bool,
+    w1: torch.Tensor | list[torch.Tensor] | None = None,
+    w2: torch.Tensor | list[torch.Tensor] | None = None,
     expert_map: torch.Tensor | None = None,
     global_redundant_expert_num: int = 0,
     mc2_mask: torch.Tensor | None = None,
@@ -135,6 +141,7 @@ def build_fused_experts_input(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        # These params will be deprecated after 310p refactoring.
         weights=MoEWeights(
             w1=w1,
             w2=w2,
@@ -159,6 +166,7 @@ def build_fused_experts_input(
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
         swiglu_limit=swiglu_limit,
+        layer=layer,
         quant=build_quant_params(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
