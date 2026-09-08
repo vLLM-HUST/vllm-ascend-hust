@@ -145,8 +145,8 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
 
 本轮收尾新增：
 
-- SpecRhythm roofline、PEARL-2 distillation、tree coordinator、scheduler 和
-  MC2 fallback 单元测试：`21 passed`（与现有 native 回归合计 `137 passed`）。
+- SpecRhythm roofline、PEARL-2 distillation（含 JSONL loader/collator）、tree
+  coordinator、scheduler 和 MC2 fallback 单元测试：相关回归合计 `140 passed`。
 - `examples/check_specslo_capabilities.py --device cpu --tp-size 3` 可运行并输出
   JSON 能力矩阵；在 NPU 上会额外报告 ACLGraph、FIA、paged attention、RoPE 和
   MC2 custom op 的导出状态。
