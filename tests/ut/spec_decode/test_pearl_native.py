@@ -82,6 +82,14 @@ def test_pearl_defaults_to_tp3_deterministic_aiv_without_overriding_user_configu
         assert os.environ["HCCL_DETERMINISTIC"] == "false"
 
 
+def test_sampling_params_support_an_independent_draft_temperature():
+    params = SamplingParams(temperature=0.0, draft_temperature=0.7)
+    assert params.temperature == 0.0
+    assert params.draft_temperature == 0.7
+    with pytest.raises(ValueError, match="temperatures"):
+        SamplingParams(draft_temperature=-0.1)
+
+
 def test_pearl_does_not_force_deterministic_hccl_for_power_of_two_target_tp():
     with patch.dict(os.environ, {}, clear=True):
         _set_default_npu_environment(target_tp_size=4)

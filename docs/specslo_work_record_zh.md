@@ -106,17 +106,23 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
 
 ## 5. 仍需设计或验证的内容
 
-- **真正高于分离路径的 TP3 MC2 kernel**：现有 AscendC MC2 是可选实验实现，
-  还没有在目标 CANN/固件版本上证明稳定地超过生产 all-reduce + matmul。
-- **SpecRhythm 与树状投机解码合并**：树的通用 metadata/verification 已有，
-  但 native engine 目前仍以线性 PEARL pipeline 为主，需要统一树宽度、KV
-  分支回滚和 HCCL envelope。
-- **通用 vLLM 服务路径**：跨 draft/target 的 worker group 仍不能由普通 V1
-  scheduler 自动创建，需要上游接口或一个正式 Ascend scheduler 插件。
-- **PEARL-2 训练/蒸馏和模型产出**：包括数据管道、loss、checkpoint 格式、
-  Ascend 训练算子和质量回归。
-- **生产级动态 shape graph**：需要按 CANN 版本建立 capture/replay 兼容矩阵，
-  并用真实请求到达分布确定 bucket，而不是只依赖离线 workload。
+- **真正高于分离路径的 TP3 MC2 kernel（硬件验证）**：custom AscendC MC2、
+  meta、编译 fusion pass 和 `pearl/mc2.py` dispatch/fallback 已完成；还没有在
+  目标 CANN/固件版本上证明稳定地超过生产 all-reduce + matmul。
+- **SpecRhythm 与树状投机解码合并（策略层已完成，native tree forward 待实机）**：
+  `SpecRhythmTreeCoordinator`、父依赖候选选择和 CANN/V1 tree mask 已完成；native
+  线性 PEARL 默认路径保持不变，树模式的 target forward/KV 分支回滚需单独压测。
+- **通用 vLLM 服务路径（metadata 层已完成）**：`SpecRhythmScheduler` 提供
+  admission、双 batch 排程、preempt/reactivate 和 global roofline；跨模型
+  worker 自动建组仍需上游 V1 scheduler 生命周期接口。
+- **PEARL-2 训练/蒸馏（训练原语已完成）**：
+  `pearl/distill.py` 提供 acceptance-weighted KL/CE、梯度裁剪、optimizer step
+  和 checkpoint；JSONL trace loader/collator 与
+  `examples/train_nano_pearl_distill.py` 已提供，teacher rollout、训练质量回归
+  仍需项目实验。
+- **生产级动态 shape graph（运行时 guard 已完成，版本矩阵待验证）**：native
+  graph 已按 shape bucket 捕获、回放、首轮 eager 对照和容量 fallback；仍需按
+  CANN 版本和真实到达分布建立 capture/replay 兼容矩阵。
 - **性能和稳定性回归**：需在固定 NPU 型号、驱动/CANN、模型量化配置下重新测
   batch、gamma、接受率、端到端延迟、SLO goodput、长上下文和多租户抢占。
 - **扩展覆盖面**：多模态、LoRA、structured output、更多 tokenizer/vocab 映射
@@ -136,6 +142,20 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
   `test_real_probe_only_fields_are_not_seeded_in_base_trace_defaults`，原因是
   参考仓库当前测试期望与其 trace 默认字段实现不一致；该文件未被本次 Ascend
   迁移修改，也不影响 NPU 推理运行时。
+
+本轮收尾新增：
+
+- SpecRhythm roofline、PEARL-2 distillation、tree coordinator、scheduler 和
+  MC2 fallback 单元测试：`21 passed`（与现有 native 回归合计 `137 passed`）。
+- `examples/check_specslo_capabilities.py --device cpu --tp-size 3` 可运行并输出
+  JSON 能力矩阵；在 NPU 上会额外报告 ACLGraph、FIA、paged attention、RoPE 和
+  MC2 custom op 的导出状态。
+- `compileall` 和 `git diff --check` 通过。
+
+参考仓库逐文件审计见
+[`atc26v0_feature_audit_zh.md`](atc26v0_feature_audit_zh.md)。该审计把上游
+scaffold/probe 与真正可执行的 nano-PEARL 功能分开记录，避免把探针通过误报为
+生产迁移完成。
 
 本次只做功能迁移和验证，没有宣称新的吞吐提升；后续性能报告必须注明模型、
 TP、batch、gamma、warmup、CANN/驱动版本和端到端计时口径。

@@ -79,6 +79,7 @@ class PearlPipelineState:
     verification_rounds: int = 0
     committed_length: int | None = None
     temperature: float = 0.0
+    draft_temperature: float = 0.0
     max_tokens: int = 64
     ignore_eos: bool = False
     slo_tpot_ms: float | None = None
@@ -96,7 +97,7 @@ class PearlPipelineState:
             self.committed_length = len(self.token_ids)
         if self.num_acc_tokens is None:
             self.num_acc_tokens = []
-        if self.temperature < 0 or self.max_tokens <= 0:
+        if self.temperature < 0 or self.draft_temperature < 0 or self.max_tokens <= 0:
             raise ValueError("PEARL sampling requires non-negative temperature and positive max_tokens.")
         if self.slo_tpot_ms is not None and self.slo_tpot_ms <= 0:
             raise ValueError("PEARL TPOT SLO must be positive when supplied.")
@@ -113,6 +114,7 @@ class PearlPipelineState:
             verification_rounds=self.verification_rounds,
             committed_length=self.committed_length,
             temperature=self.temperature,
+            draft_temperature=self.draft_temperature,
             max_tokens=self.max_tokens,
             ignore_eos=self.ignore_eos,
             slo_tpot_ms=self.slo_tpot_ms,
@@ -271,6 +273,7 @@ class NativeSamplingParams:
     """Per-request sampling controls supported by upstream nano-PEARL."""
 
     temperature: float = 1.0
+    draft_temperature: float = 0.0
     max_tokens: int = 64
     ignore_eos: bool = False
     slo_tpot_ms: float | None = None
@@ -280,8 +283,8 @@ class NativeSamplingParams:
     arrival_ts: float | None = None
 
     def __post_init__(self) -> None:
-        if self.temperature < 0:
-            raise ValueError("PEARL temperature must be non-negative.")
+        if self.temperature < 0 or self.draft_temperature < 0:
+            raise ValueError("PEARL and draft temperatures must be non-negative.")
         if self.max_tokens <= 0:
             raise ValueError("PEARL max_tokens must be positive.")
         if self.slo_tpot_ms is not None and self.slo_tpot_ms <= 0:
@@ -778,6 +781,7 @@ class NativePearlEngine:
                 tokens,
                 len(tokens),
                 temperature=params.temperature,
+                draft_temperature=params.draft_temperature,
                 max_tokens=params.max_tokens,
                 ignore_eos=params.ignore_eos,
                 slo_tpot_ms=params.slo_tpot_ms,
@@ -1193,6 +1197,7 @@ class NativePearlEngine:
                         sum(acceptance_lengths) / len(acceptance_lengths) if acceptance_lengths else 0.0
                     ),
                     "temperature": state.temperature,
+                    "draft_temperature": state.draft_temperature,
                     "max_tokens": state.max_tokens,
                     "ignore_eos": state.ignore_eos,
                     "slo_tpot_ms": state.slo_tpot_ms,
@@ -1785,6 +1790,7 @@ class NativePearlEngine:
                         else 0.0
                     ),
                     "temperature": state.temperature,
+                    "draft_temperature": state.draft_temperature,
                     "max_tokens": state.max_tokens,
                     "ignore_eos": state.ignore_eos,
                     "slo_tpot_ms": state.slo_tpot_ms,
@@ -1843,6 +1849,7 @@ class NativePearlEngine:
                 tokens,
                 len(tokens),
                 temperature=params.temperature,
+                draft_temperature=params.draft_temperature,
                 max_tokens=params.max_tokens,
                 ignore_eos=params.ignore_eos,
                 slo_tpot_ms=params.slo_tpot_ms,
@@ -1919,6 +1926,7 @@ class NativePearlEngine:
                     "num_acc_tokens": [],
                     "mean_accept_tokens": 0.0,
                     "temperature": state.temperature,
+                    "draft_temperature": state.draft_temperature,
                     "max_tokens": state.max_tokens,
                     "ignore_eos": state.ignore_eos,
                     "slo_tpot_ms": state.slo_tpot_ms,
@@ -2141,6 +2149,40 @@ class NativePearlEngine:
         return self.model.compute_greedy_tokens_with_confidence(
             hidden_states, self.draft_vocab_size
         )
+
+    def _run_device_packed_sample_with_confidence(
+        self,
+        input_ids: torch.Tensor,
+        sequence_ids: list[int],
+        positions: list[int],
+        temperatures: Sequence[float],
+        *,
+        use_aclgraph: bool = True,
+        use_fused_infer_attention: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample draft proposals and retain confidence for SpecRhythm.
+
+        Draft temperature is an optional proposal policy.  The target still
+        owns verification and correction, so a greedy target remains exact
+        even when this proposal is stochastic.
+        """
+
+        if len(temperatures) != input_ids.shape[0] or any(value <= 0 for value in temperatures):
+            raise ValueError("stochastic draft temperatures must be positive and row-aligned")
+        hidden_states = self._run_device_packed_hidden(
+            input_ids,
+            sequence_ids,
+            positions,
+            use_aclgraph=use_aclgraph,
+            use_fused_infer_attention=use_fused_infer_attention,
+        )
+        logits = self.model.compute_logits(hidden_states)[:, : self.draft_vocab_size]
+        temperature_tensor = torch.tensor(
+            temperatures, dtype=torch.float32, device=logits.device
+        ).unsqueeze(1)
+        probabilities = torch.softmax(logits.float() / temperature_tensor, dim=-1)
+        tokens = _sample_logits(logits, temperatures)
+        return tokens, probabilities.max(dim=-1).values
 
     def _target_ar_prefill(
         self,
@@ -2516,10 +2558,12 @@ class NativePearlEngine:
             device=self.device,
         )
         first_positions = [len(states[index].token_ids) - 1 for index in active_indices]
+        draft_temperatures = [states[index].draft_temperature for index in active_indices]
         draft_use_fia = not getattr(self.config, "draft_use_paged_attention", False)
         if (
             not self.config.enforce_eager
             and self.gamma <= 16
+            and all(value == 0 for value in draft_temperatures)
             and all(value == self.gamma for value in budgets)
             and hasattr(self, "graph_runner")
             and hasattr(self.graph_runner, "run_draft_greedy")
@@ -2557,13 +2601,25 @@ class NativePearlEngine:
                 )
                 step_sequence_ids = [active_indices[row] for row in active_rows]
                 positions = [first_positions[row] + step for row in active_rows]
-                step_output = self._run_device_packed_greedy(
-                    input_ids.index_select(0, row_tensor),
-                    step_sequence_ids,
-                    positions,
-                    use_aclgraph=not self.config.enforce_eager and self.gamma <= 16,
-                    use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
-                )
+                step_input = input_ids.index_select(0, row_tensor)
+                step_temperatures = [draft_temperatures[row] for row in active_rows]
+                if all(value == 0 for value in step_temperatures):
+                    step_output = self._run_device_packed_greedy(
+                        step_input,
+                        step_sequence_ids,
+                        positions,
+                        use_aclgraph=not self.config.enforce_eager and self.gamma <= 16,
+                        use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
+                    )
+                else:
+                    step_output, _ = self._run_device_packed_sample_with_confidence(
+                        step_input,
+                        step_sequence_ids,
+                        positions,
+                        step_temperatures,
+                        use_aclgraph=False,
+                        use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
+                    )
                 # Graph replays may return a persistent output buffer, so copy
                 # both the proposal column and the next-step input explicitly.
                 step_output = step_output.clone()
@@ -2628,6 +2684,7 @@ class NativePearlEngine:
             device=self.device,
         )
         first_positions = [len(states[index].token_ids) - 1 for index in active_indices]
+        draft_temperatures = [states[index].draft_temperature for index in active_indices]
         next_windows = torch.full(
             (len(active_indices), self.gamma),
             -1,
@@ -2643,13 +2700,25 @@ class NativePearlEngine:
             row_tensor = torch.tensor(active_rows, dtype=torch.long, device=self.device)
             sequence_ids = [active_indices[row] for row in active_rows]
             positions = [first_positions[row] + step for row in active_rows]
-            step_tokens, step_confidence = self._run_device_packed_greedy_with_confidence(
-                input_ids.index_select(0, row_tensor),
-                sequence_ids,
-                positions,
-                use_aclgraph=not self.config.enforce_eager and self.gamma <= 16,
-                use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
-            )
+            step_input = input_ids.index_select(0, row_tensor)
+            step_temperatures = [draft_temperatures[row] for row in active_rows]
+            if all(value == 0 for value in step_temperatures):
+                step_tokens, step_confidence = self._run_device_packed_greedy_with_confidence(
+                    step_input,
+                    sequence_ids,
+                    positions,
+                    use_aclgraph=not self.config.enforce_eager and self.gamma <= 16,
+                    use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
+                )
+            else:
+                step_tokens, step_confidence = self._run_device_packed_sample_with_confidence(
+                    step_input,
+                    sequence_ids,
+                    positions,
+                    step_temperatures,
+                    use_aclgraph=False,
+                    use_fused_infer_attention=draft_use_fia and self.gamma <= 16,
+                )
             step_tokens = step_tokens.clone()
             next_windows[row_tensor, step] = step_tokens
             confidence_sums.index_add_(0, row_tensor, step_confidence.float())
@@ -3630,6 +3699,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-model-len", type=int, default=1024)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--draft-temperature",
+        type=float,
+        default=0.0,
+        help="Optional proposal temperature; target verification remains authoritative.",
+    )
     parser.add_argument("--ignore-eos", action="store_true")
     parser.add_argument("--slo-tpot-ms", type=float)
     parser.add_argument("--slo-class")
@@ -3726,6 +3801,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     engine = NativePearlEngine(config)
     sampling_params = NativeSamplingParams(
         temperature=args.temperature,
+        draft_temperature=args.draft_temperature,
         max_tokens=args.max_tokens,
         ignore_eos=args.ignore_eos,
         slo_tpot_ms=args.slo_tpot_ms,

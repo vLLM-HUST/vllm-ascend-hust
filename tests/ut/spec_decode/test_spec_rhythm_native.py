@@ -77,6 +77,22 @@ def test_budget_shaper_preserves_prefix_by_allocating_integer_depths():
     assert plan.allocated_draft_tokens == 5
 
 
+def test_budget_plan_rejects_normal_plus_eager_global_roof_overrun():
+    from vllm_ascend.spec_decode.pearl.spec_rhythm import SpecRhythmBudgetPlan
+
+    with pytest.raises(ValueError, match="global target verification roofline"):
+        SpecRhythmBudgetPlan(
+            plan_id=0,
+            normal_budgets={0: 3},
+            eager_budgets={1: 3},
+            progress_gaps={0: 0, 1: 0},
+            eager_priorities={1: 0.0},
+            verification_roof=5,
+            draft_token_budget=6,
+            allocated_draft_tokens=6,
+        )
+
+
 def test_dual_batch_pipeline_warms_up_then_alternates():
     states = _states()
     controller = SpecRhythmPipelineController(states)

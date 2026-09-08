@@ -25,6 +25,8 @@ HUST-maintained Ascend/NPU plugin paired with vLLM-HUST
 nano-PEARL 原生运行时、树状投机解码基础设施、SLO 调度与 Ascend
 图/通信适配。完整的中文迁移记录见
 [`docs/specslo_work_record_zh.md`](docs/specslo_work_record_zh.md)。
+逐项对照 atc26v0 与论文的实现审计见
+[`docs/atc26v0_feature_audit_zh.md`](docs/atc26v0_feature_audit_zh.md)。
 
 原 vLLM-Ascend-HUST 说明保留如下，便于安装、开发和追踪上游差异。
 
@@ -200,6 +202,12 @@ This keeps environment setup, device selection, ports, logs, and cleanup aligned
 with HUST experiment services.
 
 ## Validation Checklist
+
+SpecSLO/Ascend 算子能力（不加载模型）可直接检查：
+
+```bash
+python examples/check_specslo_capabilities.py --device npu --tp-size 3
+```
 
 README-only changes:
 

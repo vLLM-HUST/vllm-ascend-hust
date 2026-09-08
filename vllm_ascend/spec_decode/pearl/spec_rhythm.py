@@ -30,7 +30,10 @@ class SpecRhythmRuntimeState:
     slo_tpot_ms: float | None = None
     slo_class: str | None = None
     max_gamma: int | None = None
-    delivered_tokens: int = 1
+    # ``N`` in the paper is the number of tokens delivered before the first
+    # verification round.  The denominator is guarded with ``max(1, N)``
+    # where it is used, so a fresh request must start at zero rather than one.
+    delivered_tokens: int = 0
     decode_elapsed_ms: float = 0.0
     acceptance_ema: float = 1.0
     draft_confidence_ema: float = 1.0
@@ -126,10 +129,16 @@ class SpecRhythmBudgetPlan:
             raise ValueError("Normal and eager SpecRhythm draft sets must be disjoint.")
         if any(value <= 0 for value in (*normal.values(), *eager.values())):
             raise ValueError("Every allocated SpecRhythm proposal must contain a token.")
-        if sum(normal.values()) > self.verification_roof:
+        normal_tokens = sum(normal.values())
+        eager_tokens = sum(eager.values())
+        if normal_tokens > self.verification_roof:
             raise ValueError("Normal proposals exceed the target verification roofline.")
-        if sum(eager.values()) > self.verification_roof:
+        if eager_tokens > self.verification_roof:
             raise ValueError("Eager proposals exceed the target verification roofline.")
+        if normal_tokens + eager_tokens > self.verification_roof:
+            raise ValueError(
+                "Normal and eager proposals exceed the global target verification roofline."
+            )
         if self.allocated_draft_tokens != sum(normal.values()) + sum(eager.values()):
             raise ValueError("SpecRhythm allocated draft-token accounting is inconsistent.")
         if self.allocated_draft_tokens > self.draft_token_budget:
@@ -195,7 +204,7 @@ class SpecRhythmBudgetShaper:
             raise ValueError("SpecRhythm cannot shape an unregistered request.")
 
         roof = self.verification_roof(
-            max(len(normal), len(eager), 1) if batch_size is None else batch_size,
+            max(len(requested), 1) if batch_size is None else batch_size,
             context_len,
         )
         available_draft = (
@@ -216,8 +225,11 @@ class SpecRhythmBudgetShaper:
         }
         eager_budgets: dict[int, int] = {}
         remaining_draft = available_draft - minimum_needed
-        remaining_normal_roof = roof - minimum_needed
-        remaining_eager_roof = roof
+        # The roofline is a target-side *global* candidate budget.  Normal and
+        # eager proposals share it because both are verified in the same target
+        # step.  Keeping one counter also makes the invariant explicit for
+        # future tree-shaped allocations.
+        remaining_roof = roof - minimum_needed
         gaps = {
             index: states[index].projected_progress_gap(projected_wait_ms)
             for index in requested
@@ -245,15 +257,15 @@ class SpecRhythmBudgetShaper:
             cap = min(self.max_gamma, state.max_gamma or self.max_gamma)
             if index in normal_budgets:
                 wanted = max(0, min(cap, gaps[index]) - normal_budgets[index])
-                grant = min(wanted, remaining_normal_roof, remaining_draft)
+                grant = min(wanted, remaining_roof, remaining_draft)
                 normal_budgets[index] += grant
-                remaining_normal_roof -= grant
+                remaining_roof -= grant
             else:
                 wanted = min(cap, max(self.min_gamma, gaps[index]))
-                grant = min(wanted, remaining_eager_roof, remaining_draft)
+                grant = min(wanted, remaining_roof, remaining_draft)
                 if grant > 0:
                     eager_budgets[index] = grant
-                    remaining_eager_roof -= grant
+                    remaining_roof -= grant
             remaining_draft -= grant
             if remaining_draft <= 0:
                 break
@@ -262,9 +274,9 @@ class SpecRhythmBudgetShaper:
         # progress. Deeper tokens decay by the measured acceptance benefit.
         while remaining_draft > 0:
             candidates: list[tuple[float, int, str]] = []
-            for kind, budgets, indices, remaining_roof in (
-                ("normal", normal_budgets, normal, remaining_normal_roof),
-                ("eager", eager_budgets, eager, remaining_eager_roof),
+            for kind, budgets, indices in (
+                ("normal", normal_budgets, normal),
+                ("eager", eager_budgets, eager),
             ):
                 if remaining_roof <= 0:
                     continue
@@ -286,10 +298,9 @@ class SpecRhythmBudgetShaper:
             index = -negative_index
             if kind == "normal":
                 normal_budgets[index] += 1
-                remaining_normal_roof -= 1
             else:
                 eager_budgets[index] = eager_budgets.get(index, 0) + 1
-                remaining_eager_roof -= 1
+            remaining_roof -= 1
             remaining_draft -= 1
 
         allocated = sum(normal_budgets.values()) + sum(eager_budgets.values())
@@ -518,6 +529,121 @@ class SpecRhythmPipelineController:
             self.invalidate_request(index)
 
 
+@dataclass(frozen=True)
+class SpecRhythmSchedule:
+    """Portable scheduler output for a generic vLLM service adapter."""
+
+    execution: SpecRhythmExecutionPlan
+    budget: SpecRhythmBudgetPlan
+
+
+class SpecRhythmScheduler:
+    """Request admission/preemption adapter shared by non-native frontends.
+
+    The scheduler owns metadata and lifecycle only. A worker integration can
+    consume :class:`SpecRhythmSchedule.budget`, execute its own draft/target
+    forwards, then call :meth:`finish_verification` to commit the guarded
+    prefix. This keeps generic request admission independent from the Ascend
+    HCCL transport.
+    """
+
+    def __init__(self, shaper: SpecRhythmBudgetShaper, *, max_num_seqs: int = 512) -> None:
+        if max_num_seqs <= 0:
+            raise ValueError("SpecRhythm scheduler max_num_seqs must be positive")
+        self.shaper = shaper
+        self.max_num_seqs = int(max_num_seqs)
+        self.request_states: dict[int, SpecRhythmRuntimeState] = {}
+        self._active: list[int] = []
+        self.controller = SpecRhythmPipelineController(self.request_states)
+
+    @property
+    def active_request_indices(self) -> tuple[int, ...]:
+        return tuple(self._active)
+
+    def admit(
+        self,
+        request_index: int,
+        *,
+        home_batch_id: int | None = None,
+        slo_tpot_ms: float | None = None,
+        slo_class: str | None = None,
+        max_gamma: int | None = None,
+    ) -> SpecRhythmRuntimeState:
+        """Register and admit one request into the alternating batch set."""
+
+        index = int(request_index)
+        if index in self.request_states:
+            raise ValueError(f"SpecRhythm request {index} is already registered")
+        if len(self._active) >= self.max_num_seqs:
+            raise RuntimeError("SpecRhythm scheduler has no free request slots")
+        if home_batch_id is None:
+            counts = [
+                sum(self.request_states[current].home_batch_id == home for current in self._active)
+                for home in (0, 1)
+            ]
+            home_batch_id = 0 if counts[0] <= counts[1] else 1
+        state = SpecRhythmRuntimeState(
+            request_index=index,
+            home_batch_id=int(home_batch_id),
+            slo_tpot_ms=slo_tpot_ms,
+            slo_class=slo_class,
+            max_gamma=max_gamma,
+        )
+        self.request_states[index] = state
+        self._active.append(index)
+        return state
+
+    def preempt(self, request_index: int) -> None:
+        """Remove a request from active scheduling while retaining accounting."""
+
+        index = int(request_index)
+        if index not in self.request_states:
+            raise KeyError(index)
+        self.controller.invalidate_request(index)
+        self._active = [current for current in self._active if current != index]
+
+    def reactivate(self, request_index: int) -> None:
+        index = int(request_index)
+        if index not in self.request_states:
+            raise KeyError(index)
+        if index in self._active:
+            return
+        if len(self._active) >= self.max_num_seqs:
+            raise RuntimeError("SpecRhythm scheduler has no free request slots")
+        self._active.append(index)
+
+    def remove(self, request_index: int) -> None:
+        index = int(request_index)
+        self.preempt(index)
+        del self.request_states[index]
+
+    def schedule(
+        self,
+        *,
+        projected_wait_ms: float,
+        context_len: int,
+        draft_token_budget: int | None = None,
+        batch_size: int | None = None,
+    ) -> SpecRhythmSchedule:
+        """Build a dual-batch execution plan and one global roofline budget."""
+
+        execution = self.controller.build_plan(self._active)
+        budget = self.shaper.shape(
+            plan_id=execution.plan_id,
+            normal_request_indices=execution.normal_draft_request_indices,
+            eager_request_indices=execution.eager_candidate_indices,
+            states=self.request_states,
+            projected_wait_ms=projected_wait_ms,
+            context_len=context_len,
+            draft_token_budget=draft_token_budget,
+            batch_size=batch_size,
+        )
+        return SpecRhythmSchedule(execution=execution, budget=budget)
+
+    def finish_verification(self, request_index: int, **kwargs) -> SpecRhythmProposalTicket | None:
+        return self.controller.finish_verification(request_index, **kwargs)
+
+
 __all__ = [
     "PipelinePhase",
     "ProposalLifecycle",
@@ -525,6 +651,8 @@ __all__ = [
     "SpecRhythmBudgetShaper",
     "SpecRhythmExecutionPlan",
     "SpecRhythmPipelineController",
+    "SpecRhythmSchedule",
+    "SpecRhythmScheduler",
     "SpecRhythmProposalTicket",
     "SpecRhythmRuntimeState",
 ]
