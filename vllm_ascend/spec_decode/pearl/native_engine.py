@@ -316,7 +316,10 @@ class NativeSpecRhythmDevicePayload:
     verification_tokens: torch.Tensor
     next_tokens: torch.Tensor
     verification_size: int
-    draft_confidence: float
+    # Target ranks keep this as a device scalar until the verdict result is
+    # materialized.  That lets the proposal and verdict exchanges share one
+    # device-to-host synchronization per round.
+    draft_confidence: float | torch.Tensor | None
 
     def validate_for(self, state: PearlPipelineState) -> None:
         if self.ticket.required_prefix_epoch != state.continuation_epoch:
@@ -341,6 +344,12 @@ class NativeSpecRhythmDevicePayload:
             )
         if self.next_tokens.shape != (self.ticket.gamma,):
             raise RuntimeError("SpecRhythm mailbox continuation tensor has an invalid shape.")
+        if self.draft_confidence is None:
+            return
+        if torch.is_tensor(self.draft_confidence):
+            if self.draft_confidence.numel() != 1:
+                raise RuntimeError("SpecRhythm mailbox confidence must be a scalar.")
+            return
         if not math.isfinite(self.draft_confidence) or not 0.0 <= self.draft_confidence <= 1.0:
             raise RuntimeError("SpecRhythm mailbox confidence must be finite and in [0, 1].")
 
@@ -831,7 +840,27 @@ class NativePearlEngine:
         )
         torch.npu.synchronize()
         started = time.perf_counter()
-        if self.config.enable_spec_rhythm:
+        spec_rhythm_has_scheduler_constraints = any(
+            params.slo_tpot_ms is not None
+            or params.slo_class is not None
+            or params.arrival_ts is not None
+            or params.spec_rhythm_max_gamma is not None
+            for params in prefill_params
+        )
+        # With no SLO or per-request budget, SpecRhythm has no scheduling
+        # decision to make. Reuse PEARL's packed fast path so enabling the
+        # policy does not add a control-plane round trip to ordinary serving.
+        spec_rhythm_needs_control_plane = (
+            self.config.enable_spec_rhythm
+            and (
+                spec_rhythm_has_scheduler_constraints
+                or self.config.spec_rhythm_min_gamma != self.gamma
+                or self.config.spec_rhythm_max_eager_tokens != 0
+                or self.config.spec_rhythm_roofline is not None
+                or self.config.spec_rhythm_draft_token_budget is not None
+            )
+        )
+        if spec_rhythm_needs_control_plane:
             return self._generate_spec_rhythm_decode(
                 draft_states=draft_states,
                 target_states=target_states,
@@ -1635,6 +1664,21 @@ class NativePearlEngine:
                         decode_profile_seconds["wait_sync"] += (
                             time.perf_counter() - wait_started
                         )
+                proposal_confidences = None
+                proposal_confidence_scale = 1.0
+                if target_payloads:
+                    confidence_values = []
+                    for payload in target_payloads:
+                        confidence = payload.draft_confidence
+                        if confidence is None:
+                            confidence = 1.0
+                        if not torch.is_tensor(confidence):
+                            confidence = torch.tensor(
+                                float(confidence), dtype=torch.float32, device=self.device
+                            )
+                        confidence_values.append(confidence.reshape(()))
+                    proposal_confidences = torch.stack(confidence_values)
+                    proposal_confidence_scale = 1.0 if self.is_draft else 1e-6
                 phase_started = time.perf_counter()
                 accepted, corrections, synchronized_next = self._broadcast_device_round_result(
                     verdict,
@@ -1646,6 +1690,8 @@ class NativePearlEngine:
                     next_window_sizes=[
                         payload.ticket.gamma for payload in target_payloads
                     ],
+                    extra_device_values=proposal_confidences,
+                    extra_device_scale=proposal_confidence_scale,
                     profile_phase_seconds=(
                         decode_profile_seconds if profile_this_round else None
                     ),
@@ -1682,7 +1728,15 @@ class NativePearlEngine:
                         proposed_tokens=expected,
                         accepted_tokens=accepted[row],
                         delivered_tokens=delivered,
-                        draft_confidence=payload.draft_confidence,
+                        draft_confidence=(
+                            self._last_device_round_extra_values[row]
+                            if proposal_confidences is not None
+                            else (
+                                None
+                                if payload.draft_confidence is None
+                                else float(payload.draft_confidence)
+                            )
+                        ),
                         ema_alpha=self.config.spec_rhythm_acceptance_ema_alpha,
                     )
                     payloads.pop(payload.ticket.proposal_id, None)
@@ -2946,7 +3000,7 @@ class NativePearlEngine:
         confidences: torch.Tensor | None,
         tickets: Sequence[SpecRhythmProposalTicket],
         verification_sizes: Sequence[int],
-    ) -> tuple[torch.Tensor | None, list[float]]:
+    ) -> tuple[torch.Tensor | None, Sequence[float | torch.Tensor]]:
         """Broadcast a self-describing variable-offset proposal envelope."""
 
         count = len(tickets)
@@ -2960,12 +3014,9 @@ class NativePearlEngine:
         if self.is_draft:
             if confidences is None or confidences.shape != (count,):
                 raise RuntimeError("SpecRhythm draft confidence tensor has an invalid shape.")
-            quantized_confidences = [
-                int(round(float(value) * 1_000_000))
-                for value in confidences.detach().cpu().tolist()
-            ]
+            quantized_confidences = torch.round(confidences * 1_000_000).to(torch.long)
         else:
-            quantized_confidences = [0] * count
+            quantized_confidences = None
 
         if self.groups.is_verification_worker:
             if self.rank == self.topology.draft_leader_rank:
@@ -2976,9 +3027,7 @@ class NativePearlEngine:
                 metadata = torch.tensor(
                     [
                         value
-                        for ticket, size, confidence in zip(
-                            tickets, verification_sizes, quantized_confidences
-                        )
+                        for ticket, size in zip(tickets, verification_sizes)
                         for value in (
                             ticket.proposal_id,
                             ticket.request_index,
@@ -2986,13 +3035,15 @@ class NativePearlEngine:
                             size,
                             ticket.gamma,
                             ticket.required_prefix_epoch,
-                            confidence,
+                            0,
                         )
                     ],
                     dtype=torch.long,
                     device=self.device,
                 )
-                message = torch.cat((metadata, verification_window, next_windows.flatten()))
+                metadata = metadata.reshape(count, metadata_width)
+                metadata[:, 6] = quantized_confidences
+                message = torch.cat((metadata.reshape(-1), verification_window, next_windows.flatten()))
             else:
                 message = torch.empty(message_size, dtype=torch.long, device=self.device)
             dist.broadcast(
@@ -3000,26 +3051,32 @@ class NativePearlEngine:
                 src=self.topology.draft_leader_rank,
                 group=self.groups.verification_group,
             )
-            metadata_values = message[: metadata_width * count].reshape(
-                count, metadata_width
-            ).cpu().tolist()
-            expected = [
-                [
-                    ticket.proposal_id,
-                    ticket.request_index,
-                    ticket.home_batch_id,
-                    int(size),
-                    ticket.gamma,
-                    ticket.required_prefix_epoch,
+            metadata = message[: metadata_width * count].reshape(count, metadata_width)
+            if os.getenv("VLLM_ASCEND_SPECRHYTHM_VALIDATE_MAILBOX", "0") == "1":
+                metadata_values = metadata.cpu().tolist()
+                expected = [
+                    [
+                        ticket.proposal_id,
+                        ticket.request_index,
+                        ticket.home_batch_id,
+                        int(size),
+                        ticket.gamma,
+                        ticket.required_prefix_epoch,
+                    ]
+                    for ticket, size in zip(tickets, verification_sizes)
                 ]
-                for ticket, size in zip(tickets, verification_sizes)
-            ]
-            if [row[:6] for row in metadata_values] != expected:
-                raise RuntimeError("SpecRhythm received a misrouted or stale HCCL mailbox envelope.")
-            quantized_confidences = [int(row[6]) for row in metadata_values]
+                if [row[:6] for row in metadata_values] != expected:
+                    raise RuntimeError(
+                        "SpecRhythm received a misrouted or stale HCCL mailbox envelope."
+                    )
+            if self.is_draft:
+                confidence_values: Sequence[float | torch.Tensor] = confidences
+            else:
+                confidence_values = metadata[:, 6]
         else:
             message = None
-        return message, [value / 1_000_000.0 for value in quantized_confidences]
+            confidence_values = []
+        return message, confidence_values
 
     def _materialize_spec_rhythm_payloads(
         self,
@@ -3029,7 +3086,7 @@ class NativePearlEngine:
         local_verification: torch.Tensor | None,
         local_next_windows: torch.Tensor | None,
         exchanged_message: torch.Tensor | None,
-        draft_confidences: Sequence[float],
+        draft_confidences: Sequence[float | torch.Tensor],
     ) -> list[NativeSpecRhythmDevicePayload]:
         count = len(tickets)
         metadata_size = count * 7
@@ -3059,7 +3116,9 @@ class NativePearlEngine:
                     verification_tokens=verification[offset : offset + size],
                     next_tokens=continuations[row, : ticket.gamma],
                     verification_size=int(size),
-                    draft_confidence=float(confidence),
+                    draft_confidence=(
+                        confidence.reshape(()) if torch.is_tensor(confidence) else confidence
+                    ),
                 )
             )
             offset += size
@@ -3301,9 +3360,18 @@ class NativePearlEngine:
         *,
         replicated_target_verdict: bool,
         next_window_sizes: Sequence[int] | None = None,
+        extra_device_values: torch.Tensor | None = None,
+        extra_device_scale: float = 1.0,
         profile_phase_seconds: dict[str, float] | None = None,
     ) -> tuple[list[int], list[int | None], list[list[int]]]:
         """Synchronize only the verdict; proposal continuations stay local."""
+        self._last_device_round_extra_values: list[float] = []
+        if extra_device_values is not None:
+            if extra_device_values.ndim != 1:
+                raise ValueError("Extra PEARL round values must be a one-dimensional tensor.")
+            if extra_device_values.numel() != batch_size:
+                raise ValueError("Extra PEARL round values must match the target batch size.")
+            extra_device_values = extra_device_values.to(device=self.device)
         is_target_rank = self.rank in self.topology.target_ranks
         if is_target_rank:
             if verdict is None:
@@ -3340,7 +3408,15 @@ class NativePearlEngine:
                 raise RuntimeError("A PEARL target rank did not receive the draft continuation window.")
             continuation = draft_message[verification_size:]
         materialize_started = time.perf_counter()
-        values = torch.cat((verdict_result, continuation)).cpu().tolist()
+        materialized = torch.cat((verdict_result, continuation))
+        extra_size = 0 if extra_device_values is None else extra_device_values.numel()
+        if extra_device_values is not None:
+            materialized = torch.cat((materialized, extra_device_values))
+        values = materialized.cpu().tolist()
+        if extra_size:
+            self._last_device_round_extra_values = [
+                float(value) * extra_device_scale for value in values[-extra_size:]
+            ]
         if profile_phase_seconds is not None:
             profile_phase_seconds["wait_sync"] += time.perf_counter() - materialize_started
         verdict_values = values[: batch_size * 2]

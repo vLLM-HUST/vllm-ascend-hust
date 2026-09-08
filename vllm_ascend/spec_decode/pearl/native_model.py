@@ -941,7 +941,10 @@ class NativeQwen2ForCausalLM(nn.Module):
             actual_seq_lengths_q=tuple(cumulative_query_lengths),
             sequence_lens=tuple(sequence_lens),
             request_block_tables=request_block_tables,
-            attention_mask=self.attention_mask,
+            # Packed PA uses sequence metadata for causality, while FIA needs
+            # the cached causal mask for its TND query segments. Tree metadata
+            # supplies its own request-local mask separately.
+            attention_mask=self.attention_mask if use_fused_infer_attention else None,
             use_fused_infer_attention=use_fused_infer_attention,
         )
         return position_tensor, metadata

@@ -241,9 +241,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise ValueError("--profile-only requires --profile-decode-steps to be positive.")
     if args.num_pearl_steps is not None and args.num_pearl_steps <= 0:
         raise ValueError("--num-pearl-steps must be positive.")
-    if args.num_pearl_steps is not None and (
-        args.enable_continuous_batching or args.enable_spec_rhythm
-    ):
+    if args.num_pearl_steps is not None and args.enable_continuous_batching:
         raise ValueError("Fixed-step PEARL does not support continuous batching.")
     max_batch_size = max(args.batch_sizes)
     target_graph_post_counts = _parse_target_graph_post_counts(
