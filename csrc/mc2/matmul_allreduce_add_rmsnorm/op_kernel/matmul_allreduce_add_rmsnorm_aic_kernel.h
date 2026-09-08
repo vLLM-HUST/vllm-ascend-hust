@@ -86,7 +86,7 @@ public:
         this->m = ppTilingData->opShape.m;
         this->k = ppTilingData->opShape.k;
         this->n = ppTilingData->opShape.n;
-        this->weight_nz = false;
+        this->weight_nz = ppTilingData->weightNz;
 
         this->is_int8 = false;
         this->cube_matrix_size = this->is_int8 ? CUBE_MATRIX_SIZE_B8 : CUBE_MATRIX_SIZE_B16;
@@ -212,9 +212,17 @@ public:
         gmB.SetGlobalBuffer(gm_b_src, k * n);
 
         using LayoutA = layout::RowMajor;
+#if defined(FORMAT_X2) && FORMAT_X2 == FORMAT_FRACTAL_NZ
+        using LayoutB = layout::nZ;
+#else
         using LayoutB = layout::ColumnMajor;
+#endif
         using LayoutC = layout::RowMajor;
+#if defined(FORMAT_X2) && FORMAT_X2 == FORMAT_FRACTAL_NZ
+        LayoutB layoutB = LayoutB::MakeLayout<MmadDtype>(k, n);
+#else
         LayoutB layoutB {(layout::ColumnMajor::Index)k, (layout::ColumnMajor::Index)n};
+#endif
 
         using L1TileShape = GemmShape<MM_L1_TILE_SHAPE_M, MM_L1_TILE_SHAPE_N, MM_L1_TILE_SHAPE_K>;
         using L0TileShape = GemmShape<MM_L0_TILE_SHAPE_M, MM_L0_TILE_SHAPE_N, MM_L0_TILE_SHAPE_K>;

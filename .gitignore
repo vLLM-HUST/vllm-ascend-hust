@@ -223,3 +223,7 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
+
+# Local CANN build diagnostics; never publish generated failure trees.
+csrc/build.failed-*/
+csrc/build.interrupted-*/

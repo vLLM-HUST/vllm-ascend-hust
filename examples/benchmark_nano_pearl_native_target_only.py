@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -18,11 +21,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-model-len", type=int, default=1024)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32])
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        help="Total requests per measurement. Defaults to the batch size.",
+    )
+    parser.add_argument(
+        "--warmup-prompts",
+        type=int,
+        help="Warm up on only this many prompts. Defaults to the measured workload.",
+    )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--num-kvcache-blocks", type=int, default=-1)
+    parser.add_argument("--prefill-chunk-size", type=int)
     parser.add_argument("--worker-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-prefix-caching", action="store_true")
+    parser.add_argument("--output-json")
     prompt_group = parser.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("--prompt")
     prompt_group.add_argument("--gsm8k", help="Path to a GSM8K parquet file.")
@@ -32,9 +47,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def _load_prompts(prompt: str | None, gsm8k: str | None, max_samples: int) -> list[str]:
     if prompt is not None:
         return [prompt] * max_samples
+    dataset_path = Path(gsm8k)
+    if dataset_path.suffix == ".jsonl":
+        rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines()]
+        if len(rows) < max_samples:
+            raise ValueError(f"GSM8K contains {len(rows)} rows, but {max_samples} were requested.")
+        return [str(row["turns"][0]) for row in rows[:max_samples]]
     import pyarrow.parquet as pq
 
-    rows = pq.read_table(gsm8k, columns=["question"]).to_pylist()
+    rows = pq.read_table(dataset_path, columns=["question"]).to_pylist()
     if len(rows) < max_samples:
         raise ValueError(f"GSM8K contains {len(rows)} rows, but batch size {max_samples} was requested.")
     return [str(row["question"]) for row in rows[:max_samples]]
@@ -44,11 +65,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     if any(batch_size <= 0 for batch_size in args.batch_sizes):
         raise ValueError("Every target-only batch size must be positive.")
+    if args.num_prompts is not None and args.num_prompts <= 0:
+        raise ValueError("The target-only prompt count must be positive.")
+    if args.warmup_prompts is not None and args.warmup_prompts <= 0:
+        raise ValueError("--warmup-prompts must be positive.")
+    if args.num_prompts is not None and len(args.batch_sizes) != 1:
+        raise ValueError("--num-prompts requires exactly one --batch-sizes value.")
     max_batch_size = max(args.batch_sizes)
 
     from vllm_ascend.spec_decode.pearl import PEARLConfig, PEARLEngine, SamplingParams
 
-    prompts = _load_prompts(args.prompt, args.gsm8k, max_batch_size)
+    prompt_count = args.num_prompts or max_batch_size
+    prompts = _load_prompts(args.prompt, args.gsm8k, prompt_count)
     config = PEARLConfig(
         draft_model_path=args.draft_model,
         target_model_path=args.target_model,
@@ -56,6 +84,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         target_tensor_parallel_size=args.target_tp_size,
         max_num_batched_tokens=args.max_model_len * max_batch_size,
         max_num_seqs=max_batch_size,
+        prefill_chunk_size=args.prefill_chunk_size,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         num_kvcache_blocks=args.num_kvcache_blocks,
@@ -75,46 +104,62 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         first_prompt_token_ids = list(engine.tokenizer.encode(first_formatted_prompt))
         for batch_size in args.batch_sizes:
-            for prompt in prompts[:batch_size]:
+            measured_prompts = prompts[: args.num_prompts or batch_size]
+            warmup_prompts = measured_prompts[: args.warmup_prompts]
+            for prompt in warmup_prompts:
                 engine.add_request(prompt, sampling_params)
             engine.AR_generate()
 
-            for prompt in prompts[:batch_size]:
+            for prompt in measured_prompts:
                 engine.add_request(prompt, sampling_params)
             started = time.perf_counter()
             _, num_tokens, _, inference_elapsed = engine.AR_generate()
             e2e_elapsed = time.perf_counter() - started
             output_tokens = sum(num_tokens)
-            first_metrics = engine.last_metrics[0]
+            chunk_metrics = engine.last_metrics[::batch_size]
+            output_token_rows = [metric["completion_token_ids"] for metric in engine.last_metrics]
             results.append(
                 {
                     "batch_size": batch_size,
+                    "num_prompts": len(measured_prompts),
+                    "num_static_chunks": math.ceil(len(measured_prompts) / batch_size),
                     "output_tokens": output_tokens,
                     "inference_elapsed_seconds": inference_elapsed,
                     "e2e_elapsed_seconds": e2e_elapsed,
                     "inference_throughput_tokens_per_second": output_tokens / inference_elapsed,
                     "e2e_throughput_tokens_per_second": output_tokens / e2e_elapsed,
-                    "prefill_elapsed_seconds": first_metrics["prefill_elapsed_seconds"],
-                    "decode_elapsed_seconds": first_metrics["decode_elapsed_seconds"],
-                    "first_output_token_ids": first_metrics["completion_token_ids"],
+                    "prefill_elapsed_seconds": sum(
+                        metric["prefill_elapsed_seconds"] for metric in chunk_metrics
+                    ),
+                    "decode_elapsed_seconds": sum(
+                        metric["decode_elapsed_seconds"] for metric in chunk_metrics
+                    ),
+                    "output_token_ids_sha256": hashlib.sha256(
+                        json.dumps(output_token_rows, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "first_output_token_ids": engine.last_metrics[0]["completion_token_ids"],
                 }
             )
 
-    print(
-        json.dumps(
-            {
-                "backend": "nano-pearl-native-target-only",
-                "draft_model": args.draft_model,
-                "target_model": args.target_model,
-                "draft_tensor_parallel_size": args.draft_tp_size,
-                "target_tensor_parallel_size": args.target_tp_size,
-                "max_tokens": args.max_tokens,
-                "first_prompt_token_ids": first_prompt_token_ids,
-                "results": results,
-            },
-            ensure_ascii=True,
-        )
-    )
+    payload = {
+        "backend": "nano-pearl-native-target-only",
+        "draft_model": args.draft_model,
+        "target_model": args.target_model,
+        "draft_tensor_parallel_size": args.draft_tp_size,
+        "target_tensor_parallel_size": args.target_tp_size,
+        "prefill_chunk_size": args.prefill_chunk_size,
+        "enable_prefix_caching": args.enable_prefix_caching,
+        "max_tokens": args.max_tokens,
+        "warmup_prompts": args.warmup_prompts,
+        "first_prompt_token_ids": first_prompt_token_ids,
+        "results": results,
+    }
+    output = json.dumps(payload, ensure_ascii=True)
+    if args.output_json is not None:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(f"{output}\n", encoding="utf-8")
+    print(output)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from vllm.v1.sample.rejection_sampler import (
 )
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.tree import verify_greedy_tree_batch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.reject_sample import (
@@ -31,6 +32,7 @@ from vllm_ascend.ops.triton.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.spec_decode.tree_kv import verify_greedy_tree_device
 
 
 class AscendRejectionSampler(RejectionSampler):
@@ -213,21 +215,65 @@ class AscendRejectionSampler(RejectionSampler):
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
+        constrained_target_logits = apply_sampling_constraints(
             target_logits, metadata.cu_num_draft_tokens, sampling_metadata, self.top_k
         )
 
-        output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
-            metadata.num_draft_tokens,
-            metadata.max_spec_len,
-            metadata.cu_num_draft_tokens,
-            draft_probs,
-            target_logits,
-            bonus_token_ids,
-            sampling_metadata,
-            ori_target_logits=raw_target_logits,
-        )
+        accepted_token_indices = None
+        if metadata.tree_parent_indices is not None:
+            if not sampling_metadata.all_greedy:
+                raise ValueError("tree speculative decoding requires temperature=0")
+            assert metadata.tree_depth is not None
+            tree_target_logits = (
+                constrained_target_logits[0]
+                if isinstance(constrained_target_logits, tuple)
+                else constrained_target_logits
+            )
+            target_token_ids = greedy_sample(tree_target_logits)
+            batch_size = len(metadata.num_draft_tokens)
+            num_nodes = metadata.num_draft_tokens[0]
+            if num_nodes > 0 and all(
+                count == num_nodes for count in metadata.num_draft_tokens
+            ):
+                output_token_ids, accepted_token_indices = (
+                    verify_greedy_tree_device(
+                        metadata.draft_token_ids,
+                        metadata.tree_parent_indices,
+                        target_token_ids,
+                        bonus_token_ids.flatten(),
+                        batch_size,
+                        num_nodes,
+                        metadata.tree_depth,
+                        PLACEHOLDER_TOKEN_ID,
+                    )
+                )
+            else:
+                output_device = metadata.draft_token_ids.device
+                tree_output = verify_greedy_tree_batch(
+                    metadata.draft_token_ids.cpu(),
+                    metadata.tree_parent_indices.cpu(),
+                    metadata.num_draft_tokens,
+                    target_token_ids.cpu(),
+                    bonus_token_ids.flatten().cpu(),
+                    metadata.tree_depth,
+                    PLACEHOLDER_TOKEN_ID,
+                )
+                output_token_ids = tree_output.token_ids.to(output_device)
+                accepted_token_indices = tree_output.accepted_node_indices.to(
+                    output_device
+                )
+        else:
+            output_token_ids = rejection_sample(
+                metadata.draft_token_ids,
+                metadata.num_draft_tokens,
+                metadata.max_spec_len,
+                metadata.cu_num_draft_tokens,
+                draft_probs,
+                constrained_target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+                ori_target_logits=raw_target_logits,
+            )
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
@@ -243,6 +289,7 @@ class AscendRejectionSampler(RejectionSampler):
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+            accepted_token_indices=accepted_token_indices,
         )
 
 

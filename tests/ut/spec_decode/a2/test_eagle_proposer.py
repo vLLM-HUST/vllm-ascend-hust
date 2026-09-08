@@ -214,6 +214,9 @@ class TestEagleProposerInitialization(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.tree_width = None
+        self.vllm_config.speculative_config.tree_depth = None
+        self.vllm_config.speculative_config.use_heterogeneous_vocab = False
         self.vllm_config.speculative_config.parallel_drafting = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
         self.vllm_config.speculative_config.draft_model_config.hf_config = MagicMock(spec=[])
@@ -261,6 +264,31 @@ class TestEagleProposerInitialization(TestBase):
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
             self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+
+    def test_tree_initialization_allocates_one_buffer_per_depth(self):
+        self.vllm_config.speculative_config.method = "eagle"
+        self.vllm_config.speculative_config.num_speculative_tokens = 4
+        self.vllm_config.speculative_config.tree_width = 2
+        self.vllm_config.speculative_config.tree_depth = 2
+        self.vllm_config.speculative_config.draft_model_config.get_hidden_size.return_value = 4096
+        self.vllm_config.speculative_config.draft_model_config.get_inputs_embeds_size.return_value = 4096
+        self.vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        self.vllm_config.model_config.enforce_eager = False
+        self.vllm_config.speculative_config.enforce_eager = False
+        self.vllm_config.scheduler_config.async_scheduling = False
+        init_ascend_config(self.vllm_config)
+
+        with set_current_vllm_config(self.vllm_config):
+            proposer = AscendEagleProposer(
+                vllm_config=self.vllm_config,
+                device=self.device,
+                runner=self.runner,
+            )
+
+        self.assertEqual(proposer.num_draft_steps, 2)
+        self.assertEqual(len(proposer.slot_mapping_group), 2)
+        self.assertEqual(len(proposer.seq_lens_group), 2)
+        self.assertEqual(len(proposer.query_start_loc_group), 2)
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -358,6 +386,7 @@ class TestEagleProposerLoadModel(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.use_heterogeneous_vocab = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
         self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
@@ -513,6 +542,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.vllm_config.parallel_config.pipeline_parallel_size = 1
         self.vllm_config.model_config.enforce_eager = True
         self.vllm_config.model_config.is_deepseek_mla = False
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.kv_transfer_config = None
         self.vllm_config.compilation_config = MagicMock()
         self.vllm_config.compilation_config.pass_config = MagicMock()
@@ -987,6 +1017,7 @@ class TestEagleProposerPropose:
         self.runner.dcp_size = 1
         self.runner.max_num_tokens = 8192
         self.runner.max_num_reqs = 256
+        self.runner.uniform_decode_query_len = 4
         self.runner.pin_memory = False
 
         self.vllm_config.scheduler_config.max_num_batched_tokens = 1024
@@ -1004,6 +1035,7 @@ class TestEagleProposerPropose:
         self.vllm_config.parallel_config.pipeline_parallel_size = 1
         self.vllm_config.model_config.enforce_eager = True
         self.vllm_config.model_config.is_deepseek_mla = False
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.kv_transfer_config = None
         self.vllm_config.compilation_config = MagicMock()
         self.vllm_config.compilation_config.pass_config = MagicMock()
@@ -2816,6 +2848,7 @@ class TestDraftProposerHelperMethods(TestBase):
         self.vllm_config.parallel_config.enable_expert_parallel = False
         self.vllm_config.speculative_config.draft_tensor_parallel_size = 1
         self.vllm_config.speculative_config.num_speculative_tokens = 2
+        self.vllm_config.speculative_config.use_heterogeneous_vocab = False
         self.vllm_config.speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(2)])
         self.vllm_config.speculative_config.draft_model_config.uses_xdrope_dim = 0
         self.vllm_config.speculative_config.draft_model_config.uses_mrope = False
@@ -3681,6 +3714,7 @@ class TestEagleProposerSetInputsFirstPass:
         speculative_config.speculative_token_tree = str([(i + 1) * (0,) for i in range(num_speculative_tokens)])
         speculative_config.draft_tensor_parallel_size = 1
         speculative_config.disable_padded_drafter_batch = False
+        speculative_config.use_heterogeneous_vocab = False
         speculative_config.draft_model_config = MagicMock()
         speculative_config.draft_model_config.get_hidden_size.return_value = 4096
         speculative_config.draft_model_config.hf_config.hc_mult = 1
@@ -4144,6 +4178,8 @@ class TestEagleProposerSetInputsFirstPass:
             device=self.device,
             arange_block_indices=True,
         )
+        padded_rows = torch.full_like(common_attn_metadata.block_table_tensor, 999)
+        common_attn_metadata.block_table_tensor = torch.cat((common_attn_metadata.block_table_tensor, padded_rows))
 
         target_token_ids = torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32, device=self.device)
         target_positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int64, device=self.device)
@@ -4194,6 +4230,7 @@ class TestEagleProposerSetInputsFirstPass:
             "slot_mapping",
             "seq_lens_cpu",
             "_seq_lens_cpu",
+            "block_table_tensor",
         ]
 
         expected_cad = MagicMock()
@@ -4206,6 +4243,7 @@ class TestEagleProposerSetInputsFirstPass:
         expected_cad.slot_mapping = torch.tensor([0, 1, 2, -1, 16, 17, 18], device=self.device, dtype=torch.int64)
         expected_cad.seq_lens_cpu = torch.tensor([4, 3], dtype=torch.int32)
         expected_cad._seq_lens_cpu = torch.tensor([4, 3], dtype=torch.int32)
+        expected_cad.block_table_tensor = common_attn_metadata.block_table_tensor[:2]
 
         for attrition in attrs_from_cad:
             assert_attr_equal(attrition, expected_cad, out_cad)

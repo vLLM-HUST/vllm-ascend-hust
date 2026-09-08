@@ -13,6 +13,7 @@ only as the CPU test fallback.
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
@@ -26,6 +27,7 @@ from safetensors import safe_open
 from torch import nn
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.spec_decode.pearl.native_graph import (
     run_native_fused_infer_attention,
@@ -40,6 +42,7 @@ MIN_PAGED_ATTENTION_BLOCKS = 16
 
 SUPPORTED_NATIVE_ARCHITECTURES = frozenset(("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"))
 TENSOR_CORE_TILE_SIZE = 128
+ACL_FORMAT_FRACTAL_NZ = 29
 
 
 def _divide(numerator: int, denominator: int) -> int:
@@ -323,7 +326,12 @@ class NativeLMHead(NativeVocabEmbedding):
             )
             local_token_ids = torch.zeros(hidden_states.shape[0], dtype=torch.long, device=hidden_states.device)
         else:
-            local_logits = F.linear(hidden_states, self.weight[:local_vocabulary_size])
+            # Slicing a FRACTAL_NZ weight materializes an ND view that cannot be
+            # consumed by the NZ matmul kernel. Project the complete local TP
+            # shard first, then remove a target-only vocabulary suffix from the
+            # much smaller logits tensor.
+            local_logits = F.linear(hidden_states, self.weight)
+            local_logits = local_logits[:, :local_vocabulary_size]
             local_values, local_token_ids = local_logits.max(dim=-1)
             local_token_ids += self.vocab_start
         if self.context.size == 1:
@@ -341,16 +349,69 @@ class NativeLMHead(NativeVocabEmbedding):
         winning_rank = values.argmax(dim=-1, keepdim=True)
         return token_ids.gather(dim=-1, index=winning_rank).squeeze(-1)
 
+    def greedy_with_confidence(
+        self, hidden_states: torch.Tensor, vocabulary_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the global greedy token and its softmax probability."""
+
+        local_vocabulary_size = min(self.vocab_end, vocabulary_size) - self.vocab_start
+        if local_vocabulary_size <= 0:
+            local_values = torch.full(
+                (hidden_states.shape[0],),
+                -torch.inf,
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            local_token_ids = torch.zeros(
+                hidden_states.shape[0], dtype=torch.long, device=hidden_states.device
+            )
+            local_logsumexp = local_values
+        else:
+            local_logits = F.linear(hidden_states, self.weight)[:, :local_vocabulary_size]
+            local_values, local_token_ids = local_logits.float().max(dim=-1)
+            local_token_ids += self.vocab_start
+            local_logsumexp = torch.logsumexp(local_logits.float(), dim=-1)
+        if self.context.size == 1:
+            return local_token_ids, (local_values - local_logsumexp).exp()
+
+        local_summary = torch.stack(
+            (local_values, local_token_ids.float(), local_logsumexp), dim=-1
+        )
+        gathered = [torch.empty_like(local_summary) for _ in range(self.context.size)]
+        dist.all_gather(gathered, local_summary, group=self.context.group)
+        summaries = torch.stack(gathered, dim=1)
+        values = summaries[..., 0]
+        token_ids = summaries[..., 1].to(dtype=torch.long)
+        winning_rank = values.argmax(dim=-1, keepdim=True)
+        global_values = values.gather(dim=-1, index=winning_rank).squeeze(-1)
+        global_token_ids = token_ids.gather(dim=-1, index=winning_rank).squeeze(-1)
+        global_logsumexp = torch.logsumexp(summaries[..., 2], dim=-1)
+        return global_token_ids, (global_values - global_logsumexp).exp()
+
 
 class NativeRotaryEmbedding(nn.Module):
-    def __init__(self, head_dim: int, max_position_embeddings: int, rope_theta: float) -> None:
+    def __init__(
+        self,
+        head_dim: int,
+        max_position_embeddings: int,
+        rope_theta: float,
+        use_production_rope: bool = False,
+    ) -> None:
         super().__init__()
         inverse_frequencies = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         positions = torch.arange(max_position_embeddings, dtype=torch.float32)
         frequencies = torch.outer(positions, inverse_frequencies)
         cache_dtype = torch.get_default_dtype()
-        self.register_buffer("cos", frequencies.cos().to(cache_dtype), persistent=False)
-        self.register_buffer("sin", frequencies.sin().to(cache_dtype), persistent=False)
+        self.register_buffer(
+            "cos_sin_cache",
+            torch.cat((frequencies.cos(), frequencies.sin()), dim=-1).to(cache_dtype),
+            persistent=False,
+        )
+        self.use_production_rope = (
+            use_production_rope
+            and hasattr(torch.ops.vllm, "npu_rotary_embedding")
+            and os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "0") == "0"
+        )
 
     def forward(
         self,
@@ -358,8 +419,19 @@ class NativeRotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cos = self.cos[positions].unsqueeze(1)
-        sin = self.sin[positions].unsqueeze(1)
+        if query.device.type == "npu" and self.use_production_rope:
+            return torch.ops.vllm.npu_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.cos_sin_cache,
+                query.shape[-1],
+                query.shape[-1],
+                True,
+            )
+        cos, sin = self.cos_sin_cache[positions].chunk(2, dim=-1)
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
         if query.device.type == "npu":
             cos = torch.cat((cos, cos), dim=-1)
             sin = torch.cat((sin, sin), dim=-1)
@@ -412,6 +484,9 @@ class NativeAttention(nn.Module):
                 self.head_dim,
                 config.max_position_embeddings,
                 getattr(config, "rope_theta", (rope_parameters or {}).get("rope_theta", 10_000.0)),
+                use_production_rope=bool(
+                    getattr(config, "pearl_use_production_rope", False)
+                ),
             )
         else:
             self.rotary_emb = get_rope(
@@ -426,6 +501,12 @@ class NativeAttention(nn.Module):
         else:
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
+        self.use_qknorm_rope_fusion = (
+            architecture == "Qwen3ForCausalLM"
+            and self.head_dim == 128
+            and isinstance(self.rotary_emb, NativeRotaryEmbedding)
+            and hasattr(torch.ops.vllm, "qkv_rmsnorm_rope")
+        )
         self.key_cache: torch.Tensor | None = None
         self.value_cache: torch.Tensor | None = None
         self.register_buffer("block_table", None, persistent=False)
@@ -568,11 +649,32 @@ class NativeAttention(nn.Module):
         if self.key_cache is None or self.value_cache is None:
             raise RuntimeError("Configure the PEARL KV cache before running the model.")
         qkv = self.qkv_proj(hidden_states)
-        query, key, value = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
-        query = self.q_norm(query.view(-1, self.num_heads, self.head_dim))
-        key = self.k_norm(key.view(-1, self.num_kv_heads, self.head_dim))
-        value = value.view(-1, self.num_kv_heads, self.head_dim)
-        query, key = self.rotary_emb(positions, query, key)
+        if self.use_qknorm_rope_fusion and qkv.device.type == "npu" and qkv.dtype == torch.bfloat16:
+            assert isinstance(self.q_norm, NativeRMSNorm)
+            assert isinstance(self.k_norm, NativeRMSNorm)
+            assert isinstance(self.rotary_emb, NativeRotaryEmbedding)
+            query, key, value = DeviceOperator.split_qkv_rmsnorm_rope(
+                input=qkv,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                head_dim=self.head_dim,
+                eps=self.q_norm.eps,
+                q_bias=None,
+                k_bias=None,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                positions=positions,
+            )
+            query = query.view(-1, self.num_heads, self.head_dim)
+            key = key.view(-1, self.num_kv_heads, self.head_dim)
+            value = value.view(-1, self.num_kv_heads, self.head_dim)
+        else:
+            query, key, value = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+            query = self.q_norm(query.view(-1, self.num_heads, self.head_dim))
+            key = self.k_norm(key.view(-1, self.num_kv_heads, self.head_dim))
+            value = value.view(-1, self.num_kv_heads, self.head_dim)
+            query, key = self.rotary_emb(positions, query, key)
         metadata = attention_metadata or self._default_metadata(positions)
         self._write_to_cache(metadata.slot_mapping, key, value)
 
@@ -633,7 +735,6 @@ class NativeQwen2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
-
 
 class NativeQwen2ForCausalLM(nn.Module):
     """Upstream-supported decoder model with a persistent paged KV cache."""
@@ -737,14 +838,23 @@ class NativeQwen2ForCausalLM(nn.Module):
         for query_length in query_lengths:
             previous_length = cumulative_query_lengths[-1] if cumulative_query_lengths else 0
             cumulative_query_lengths.append(query_length + previous_length)
-        request_sequence_tensor = torch.tensor(request_sequence_ids, dtype=torch.long, device=device)
+        if use_fused_infer_attention:
+            request_sequence_tensor = torch.tensor(request_sequence_ids, dtype=torch.long, device=device)
+            request_block_tables = physical_block_tables.index_select(0, request_sequence_tensor)
+            # FIA consumes one table per request; the per-token PA table is not
+            # read on this path, so retain the required metadata field without
+            # issuing a second index_select.
+            token_block_tables = request_block_tables
+        else:
+            request_block_tables = None
+            token_block_tables = physical_block_tables.index_select(0, sequence_tensor)
         metadata = NativeAttentionMetadata(
             slot_mapping=slot_mapping_tensor,
             context_lens=torch.tensor([position + 1 for position in positions], dtype=torch.int32),
-            block_tables=physical_block_tables.index_select(0, sequence_tensor),
+            block_tables=token_block_tables,
             actual_seq_lengths_q=tuple(cumulative_query_lengths),
             sequence_lens=tuple(sequence_lens),
-            request_block_tables=physical_block_tables.index_select(0, request_sequence_tensor),
+            request_block_tables=request_block_tables,
             attention_mask=self.attention_mask,
             use_fused_infer_attention=use_fused_infer_attention,
         )
@@ -768,6 +878,11 @@ class NativeQwen2ForCausalLM(nn.Module):
 
     def compute_greedy_tokens(self, hidden_states: torch.Tensor, vocabulary_size: int) -> torch.Tensor:
         return self.lm_head.greedy(hidden_states, vocabulary_size)
+
+    def compute_greedy_tokens_with_confidence(
+        self, hidden_states: torch.Tensor, vocabulary_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.lm_head.greedy_with_confidence(hidden_states, vocabulary_size)
 
 
 def build_native_model(
@@ -859,6 +974,28 @@ def load_native_model_weights(model: NativeQwen2ForCausalLM, model_path: str) ->
                     # from config in this implementation.
                     if "rotary_emb" not in weight_name:
                         raise
+    _maybe_convert_linear_weights_to_nz(model)
+
+
+def _maybe_convert_linear_weights_to_nz(model: NativeQwen2ForCausalLM) -> None:
+    """Match vLLM-Ascend's opt-in BF16/FP16 FRACTAL_NZ weight path."""
+    if ascend_envs.VLLM_ASCEND_ENABLE_NZ != 2:
+        return
+    tied_embeddings = getattr(model.config, "tie_word_embeddings", False)
+    linear_types = (NativeColumnLinear, NativeRowLinear, NativeLMHead)
+    for module in model.modules():
+        if tied_embeddings and isinstance(module, NativeLMHead):
+            # GatherV2 requires the tied embedding table to stay in ND format.
+            continue
+        if (
+            isinstance(module, linear_types)
+            and getattr(module, "bias", None) is None
+            and module.weight.device.type == "npu"
+        ):
+            module.weight.data = torch_npu.npu_format_cast(
+                module.weight.data,
+                ACL_FORMAT_FRACTAL_NZ,
+            )
 
 
 def load_native_qwen2_weights(model: NativeQwen2ForCausalLM, model_path: str) -> None:

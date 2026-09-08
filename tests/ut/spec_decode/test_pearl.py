@@ -21,6 +21,7 @@ def test_topology_creates_disjoint_draft_target_and_verification_groups():
     assert topology.draft_ranks == (0, 1)
     assert topology.target_ranks == (2, 3, 4)
     assert topology.verification_ranks == (0, 2, 3, 4)
+    assert topology.correction_ranks == (0, 1, 2)
     assert topology.world_size == 5
     assert topology.is_verification_rank(0)
     assert not topology.is_verification_rank(1)

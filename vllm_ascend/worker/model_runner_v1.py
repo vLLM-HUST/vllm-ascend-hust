@@ -18,8 +18,10 @@
 #
 
 import gc
+import json
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -470,6 +472,10 @@ class NPUModelRunner(GPUModelRunner):
             if vllm_config.speculative_config
             else None
         )
+        self._eagle_post_eos_mask: torch.Tensor | None = None
+        self._eagle_post_eos_req_order: list[str] = []
+        self._eagle_batch_req_ids: set[str] = set()
+        self._eagle_batch_step = 0
         # When True, run update_full_graph_params before self.model (ENPU / graph capture order).
         # Internal / non-public toggle: read C getenv ``ENPU_ENABLE`` from enpu code (not in envs.py).
         _enpu = get_c_env("ENPU_ENABLE")
@@ -850,6 +856,7 @@ class NPUModelRunner(GPUModelRunner):
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        self._current_tree_attn_mask = None
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -1311,12 +1318,21 @@ class NPUModelRunner(GPUModelRunner):
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
+        # Tree siblings share a logical RoPE position but must retain distinct
+        # physical KV slots, so allocate slots before replacing their positions.
         if self.pcp_size <= 1:
             self.input_batch.block_table.compute_slot_mapping(
                 num_reqs,
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
             )
+
+        self._apply_tree_verification_positions(
+            scheduler_output, cu_num_tokens, positions_np
+        )
+        self._current_tree_attn_mask = self._build_tree_verification_mask(
+            scheduler_output, num_scheduled_tokens
+        )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -1671,6 +1687,24 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
         if self.pcp_size > 1:
             logits_indices = logits_indices_pcp
+        tree_parent_indices = None
+        tree_depth = None
+        tree_width = getattr(self.speculative_config, "tree_width", None)
+        if tree_width is not None:
+            from vllm.v1.spec_decode.tree import make_spine_first_tree_parents
+
+            tree_depth = self.speculative_config.tree_depth
+            assert tree_depth is not None
+            max_nodes = tree_width * tree_depth
+            if any(count < 0 or count > max_nodes for count in num_draft_tokens):
+                raise ValueError(
+                    "tree draft count exceeds tree_width * tree_depth"
+                )
+            parents = make_spine_first_tree_parents(tree_width, tree_depth, self.device)
+            tree_parent_indices = torch.cat(
+                [parents[:count] for count in num_draft_tokens if count > 0]
+            )
+
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
@@ -1679,7 +1713,206 @@ class NPUModelRunner(GPUModelRunner):
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+            tree_parent_indices=tree_parent_indices,
+            tree_depth=tree_depth,
         )
+
+    def _tree_shape(self) -> tuple[int, int] | None:
+        if self.speculative_config is None:
+            return None
+        width = getattr(self.speculative_config, "tree_width", None)
+        depth = getattr(self.speculative_config, "tree_depth", None)
+        if width is None:
+            return None
+        if depth is None or width * depth != self.num_spec_tokens:
+            raise ValueError(
+                "tree_width and tree_depth must be set and multiply to "
+                "num_speculative_tokens"
+            )
+        return width, depth
+
+    def _apply_tree_verification_positions(
+        self,
+        scheduler_output: "SchedulerOutput",
+        cu_num_tokens: np.ndarray,
+        positions_np: np.ndarray,
+    ) -> None:
+        shape = self._tree_shape()
+        if shape is None or not scheduler_output.scheduled_spec_decode_tokens:
+            return
+        width, depth = shape
+        num_nodes = width * depth
+        node_positions = np.concatenate(
+            (
+                np.arange(1, depth + 1, dtype=positions_np.dtype),
+                np.repeat(
+                    np.arange(1, depth + 1, dtype=positions_np.dtype),
+                    width - 1,
+                ),
+            )
+        )
+        for req_idx, req_id in enumerate(self.input_batch.req_ids):
+            scheduled_nodes = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id
+            )
+            if scheduled_nodes is None:
+                continue
+            req_num_nodes = len(scheduled_nodes)
+            if req_num_nodes < 1 or req_num_nodes > num_nodes:
+                raise ValueError(
+                    "scheduled tree node count exceeds configured shape"
+                )
+            query_end = int(cu_num_tokens[req_idx])
+            query_start = query_end - req_num_nodes - 1
+            req_query_len = req_num_nodes + 1
+            root_position = (
+                int(self.optimistic_seq_lens_cpu[req_idx].item())
+                - req_query_len
+            )
+            positions_np[query_start] = root_position
+            tree_positions = root_position + node_positions[:req_num_nodes]
+            positions_np[query_start + 1 : query_end] = tree_positions
+        total_tokens = int(cu_num_tokens[self.input_batch.num_reqs - 1])
+        self.positions[:total_tokens].copy_(
+            torch.from_numpy(positions_np[:total_tokens]), non_blocking=True
+        )
+
+    def _build_tree_verification_mask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+    ) -> torch.Tensor | None:
+        shape = self._tree_shape()
+        if shape is None or not scheduler_output.scheduled_spec_decode_tokens:
+            return None
+        width, depth = shape
+        num_nodes = width * depth
+        from vllm.v1.spec_decode.tree import make_spine_first_tree_parents
+
+        parents = make_spine_first_tree_parents(width, depth).tolist()
+        query_len = num_nodes + 1
+        num_reqs = self.input_batch.num_reqs
+        max_query_len = int(num_scheduled_tokens[:num_reqs].max())
+        mask_shape = (num_reqs, 1, max_query_len, self.max_model_len)
+        mask, mask_cpu_tensor = self._get_tree_attention_mask_buffers(mask_shape)
+        mask_cpu = mask_cpu_tensor.numpy()
+        mask_cpu.fill(True)
+        for req_idx, req_id in enumerate(self.input_batch.req_ids):
+            req_query_len = int(num_scheduled_tokens[req_idx])
+            prefix_len = (
+                int(self.optimistic_seq_lens_cpu[req_idx].item())
+                - req_query_len
+            )
+            scheduled_nodes = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id
+            )
+            if scheduled_nodes is None:
+                for row in range(req_query_len):
+                    mask_cpu[
+                        req_idx, 0, row, : prefix_len + row + 1
+                    ] = False
+                continue
+            req_num_nodes = len(scheduled_nodes)
+            if (
+                req_num_nodes < 1
+                or req_num_nodes > num_nodes
+                or req_query_len != req_num_nodes + 1
+            ):
+                raise ValueError(
+                    "scheduled tree query length exceeds configured shape"
+                )
+            mask_cpu[req_idx, 0, :req_query_len, :prefix_len] = False
+            mask_cpu[req_idx, 0, 0, prefix_len] = False
+            for node in range(req_num_nodes):
+                row = node + 1
+                mask_cpu[req_idx, 0, row, prefix_len] = False
+                current = node
+                while current >= 0:
+                    mask_cpu[
+                        req_idx, 0, row, prefix_len + current + 1
+                    ] = False
+                    current = parents[current]
+        mask.copy_(mask_cpu_tensor, non_blocking=True)
+        return mask
+
+    def _get_tree_attention_mask_buffers(
+        self, mask_shape: tuple[int, ...]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not hasattr(self, "_tree_attn_mask_buffers"):
+            self._tree_attn_mask_buffers: dict[tuple[int, ...], torch.Tensor] = {}
+            self._tree_attn_mask_cpu_buffers: dict[tuple[int, ...], torch.Tensor] = {}
+        mask = self._tree_attn_mask_buffers.get(mask_shape)
+        mask_cpu = self._tree_attn_mask_cpu_buffers.get(mask_shape)
+        if mask is None:
+            mask = torch.empty(mask_shape, dtype=torch.bool, device=self.device)
+            mask_cpu = torch.empty(
+                mask_shape,
+                dtype=torch.bool,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+            self._tree_attn_mask_buffers[mask_shape] = mask
+            self._tree_attn_mask_cpu_buffers[mask_shape] = mask_cpu
+        assert mask_cpu is not None
+        return mask, mask_cpu
+
+    def _build_dummy_tree_attention_mask(
+        self, num_reqs: int, query_len: int
+    ) -> torch.Tensor | None:
+        shape = self._tree_shape()
+        if shape is None:
+            return None
+        width, depth = shape
+        num_nodes = width * depth
+        if query_len != num_nodes + 1:
+            return None
+
+        from vllm.v1.spec_decode.tree import make_spine_first_tree_parents
+
+        parents = make_spine_first_tree_parents(width, depth).tolist()
+        mask_shape = (num_reqs, 1, query_len, self.max_model_len)
+        mask, mask_cpu_tensor = self._get_tree_attention_mask_buffers(mask_shape)
+        mask_cpu = mask_cpu_tensor.numpy()
+        mask_cpu.fill(True)
+        for req_idx in range(num_reqs):
+            mask_cpu[req_idx, 0, 0, 0] = False
+            for node in range(num_nodes):
+                row = node + 1
+                mask_cpu[req_idx, 0, row, 0] = False
+                current = node
+                while current >= 0:
+                    mask_cpu[req_idx, 0, row, current + 1] = False
+                    current = parents[current]
+        mask.copy_(mask_cpu_tensor, non_blocking=True)
+        return mask
+
+    def _tree_graph_eligible(
+        self,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        max_num_scheduled_tokens: int,
+    ) -> bool:
+        shape = self._tree_shape()
+        if shape is None or not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return False
+        width, depth = shape
+        query_len = width * depth + 1
+        return max_num_scheduled_tokens == query_len and bool(
+            np.all(num_scheduled_tokens[:num_reqs] == query_len)
+        )
+
+    def _pad_tree_attention_mask_for_graph(
+        self, num_reqs: int, num_reqs_padded: int
+    ) -> None:
+        if self._current_tree_attn_mask is None or num_reqs_padded <= num_reqs:
+            return
+        query_len = self._current_tree_attn_mask.shape[2]
+        padded_mask = self._build_dummy_tree_attention_mask(
+            num_reqs_padded, query_len
+        )
+        assert padded_mask is not None
+        padded_mask[:num_reqs].copy_(self._current_tree_attn_mask)
+        self._current_tree_attn_mask = padded_mask
 
     def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
         """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
@@ -2002,15 +2235,131 @@ class NPUModelRunner(GPUModelRunner):
         assert self.draft_token_ids_cpu is not None
         default_stream = torch.npu.current_stream()
         num_reqs = draft_token_ids.shape[0]
+        num_spec_tokens = draft_token_ids.shape[1]
         with torch.npu.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
+                self.draft_token_ids_cpu[
+                    :num_reqs, :num_spec_tokens
+                ].copy_(
                     draft_token_ids, non_blocking=True
                 )
+                # SpecRhythm keeps a fixed graph width but may assign a smaller
+                # budget to individual requests. Mark the unused suffix with
+                # the same invalid-token sentinel consumed by vLLM's scheduler.
+                plans = getattr(scheduler_output, "spec_rhythm_plans", None)
+                if plans:
+                    for row, req_id in enumerate(self._draft_token_req_ids[:num_reqs]):
+                        plan = plans.get(req_id)
+                        budget = getattr(plan, "gamma", None)
+                        if budget is None:
+                            continue
+                        budget = max(0, min(int(budget), num_spec_tokens))
+                        if budget < num_spec_tokens:
+                            self.draft_token_ids_cpu[row, budget:num_spec_tokens].fill_(-1)
             else:
-                self.draft_token_ids_cpu[:num_reqs] = 0
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
             self.draft_token_ids_event.record()
+
+    def _eagle_post_eos_token_id(self) -> int | None:
+        if not self.speculative_config or not self.speculative_config.use_eagle():
+            return None
+        return getattr(self.speculative_config, "eagle_post_eos_token_id", None)
+
+    def _replace_post_eos_eagle_candidates(
+        self,
+        sampled_token_ids: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replace post-EOS EAGLE candidates without changing graph shapes."""
+        replacement_token_id = self._eagle_post_eos_token_id()
+        if replacement_token_id is None:
+            return draft_token_ids
+
+        req_ids = self.input_batch.req_ids
+        num_reqs = sampled_token_ids.shape[0]
+        if self._eagle_post_eos_mask is None:
+            self._eagle_post_eos_mask = torch.zeros(
+                self.max_num_reqs, dtype=torch.bool, device=self.device
+            )
+        if req_ids != self._eagle_post_eos_req_order:
+            previous_indices = {
+                req_id: index
+                for index, req_id in enumerate(self._eagle_post_eos_req_order)
+            }
+            aligned_mask = torch.zeros_like(self._eagle_post_eos_mask)
+            for index, req_id in enumerate(req_ids):
+                previous_index = previous_indices.get(req_id)
+                if previous_index is not None:
+                    aligned_mask[index] = self._eagle_post_eos_mask[previous_index]
+            self._eagle_post_eos_mask = aligned_mask
+            self._eagle_post_eos_req_order = req_ids.copy()
+
+        eos_token_ids = self.model_config.hf_config.eos_token_id
+        if isinstance(eos_token_ids, int):
+            eos_token_ids = [eos_token_ids]
+        sampled_eos = torch.zeros(
+            num_reqs, dtype=torch.bool, device=sampled_token_ids.device
+        )
+        for eos_token_id in eos_token_ids or []:
+            sampled_eos |= (sampled_token_ids == eos_token_id).any(dim=1)
+        self._eagle_post_eos_mask[:num_reqs] |= sampled_eos
+
+        replaced_prefix = torch.where(
+            self._eagle_post_eos_mask[:num_reqs].unsqueeze(1),
+            replacement_token_id,
+            draft_token_ids[:num_reqs],
+        )
+        if num_reqs == draft_token_ids.shape[0]:
+            return replaced_prefix
+        draft_token_ids = draft_token_ids.clone()
+        draft_token_ids[:num_reqs] = replaced_prefix
+        return draft_token_ids
+
+    def _should_skip_eagle_drafter(self) -> bool:
+        if not self.speculative_config or not self.speculative_config.use_eagle():
+            return False
+        threshold = getattr(
+            self.speculative_config, "eagle_skip_drafter_after_steps", None
+        )
+        if threshold is None:
+            return False
+        current_req_ids = set(self.input_batch.req_ids)
+        if not current_req_ids:
+            return False
+        if not self._eagle_batch_req_ids.intersection(current_req_ids):
+            self._eagle_batch_req_ids = current_req_ids
+            self._eagle_batch_step = 0
+        else:
+            self._eagle_batch_req_ids.update(current_req_ids)
+        should_skip = self._eagle_batch_step >= threshold
+        self._eagle_batch_step += 1
+        return should_skip
+
+    def _propose_fixed_eagle_candidates(
+        self, sampled_token_ids: torch.Tensor
+    ) -> torch.Tensor:
+        assert self.drafter is not None
+        next_token_ids, valid_sampled_tokens_count = (
+            self.drafter.prepare_next_token_ids_padded(
+                sampled_token_ids,
+                self.requests,
+                self.input_batch,
+                self.discard_request_indices.gpu,
+                self.num_discarded_requests,
+            )
+        )
+        self._copy_valid_sampled_token_count(
+            next_token_ids, valid_sampled_tokens_count
+        )
+        replacement_token_id = self._eagle_post_eos_token_id()
+        assert replacement_token_id is not None
+        return torch.full(
+            (sampled_token_ids.shape[0], self.num_spec_tokens),
+            replacement_token_id,
+            dtype=sampled_token_ids.dtype,
+            device=sampled_token_ids.device,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -2188,8 +2537,24 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    force_eager=self.model_config.enforce_eager,
+                    force_eager=(
+                        self.model_config.enforce_eager
+                        or (
+                            self._current_tree_attn_mask is not None
+                            and not self._tree_graph_eligible(
+                                num_reqs,
+                                num_scheduled_tokens_np,
+                                max_num_scheduled_tokens,
+                            )
+                        )
+                    ),
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                )
+                self._pad_tree_attention_mask_for_graph(
+                    num_reqs,
+                    batch_desc.num_reqs
+                    if batch_desc.num_reqs is not None
+                    else num_reqs,
                 )
 
                 if logger.isEnabledFor(logging.DEBUG):
@@ -2355,6 +2720,12 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+        benchmark_probe_path = os.getenv(
+            "VLLM_ASCEND_SPEC_BENCHMARK_JSONL"
+        )
+        if benchmark_probe_path:
+            torch.npu.synchronize()
+            target_started = time.perf_counter()
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2381,9 +2752,37 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            def run_target_forward():
+                return self._model_forward(
+                    num_tokens_padded,
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                    **model_kwargs,
+                )
+
+            hidden_states = run_target_forward()
+            if os.getenv("VLLM_ASCEND_TREE_ROOFLINE_CONFIG"):
+                from vllm_ascend.benchmarks.tree_roofline import (
+                    maybe_run_tree_roofline,
+                )
+
+                maybe_run_tree_roofline(
+                    run_target_forward,
+                    scheduler_output,
+                    cudagraph_mode,
+                    lambda: self.model.compute_logits(
+                        run_target_forward()[logits_indices]
+                    ),
+                )
+        target_seconds = 0.0
+        if benchmark_probe_path:
+            torch.npu.synchronize()
+            target_seconds = time.perf_counter() - target_started
+            self._benchmark_selection_started = time.perf_counter()
+        self._benchmark_target_seconds = target_seconds
+        self._benchmark_cudagraph_mode = cudagraph_mode.name
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2491,6 +2890,11 @@ class NPUModelRunner(GPUModelRunner):
             output.kv_connector_output = kv_connector_output
             return output
 
+        benchmark_probe_path = os.getenv(
+            "VLLM_ASCEND_SPEC_BENCHMARK_JSONL"
+        )
+        target_seconds = getattr(self, "_benchmark_target_seconds", 0.0)
+
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -2523,6 +2927,65 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        if sampler_output.accepted_token_indices is not None:
+            assert spec_decode_common_attn_metadata is not None
+            tree_debug_path = os.getenv("VLLM_ASCEND_TREE_DEBUG_JSONL")
+            if tree_debug_path and spec_decode_metadata is not None:
+                query_start = int(
+                    spec_decode_common_attn_metadata.query_start_loc_cpu[0]
+                )
+                query_end = int(
+                    spec_decode_common_attn_metadata.query_start_loc_cpu[1]
+                )
+                num_nodes = spec_decode_metadata.num_draft_tokens[0]
+                first_attn_metadata = next(iter(attn_metadata.values()))
+                tree_mask = self._current_tree_attn_mask[
+                    0, 0, : query_end - query_start
+                ].cpu()
+                debug_record = {
+                    "draft_token_ids": spec_decode_metadata.draft_token_ids[
+                        :num_nodes
+                    ].cpu().tolist(),
+                    "parent_indices": spec_decode_metadata.tree_parent_indices[
+                        :num_nodes
+                    ].cpu().tolist(),
+                    "sampled_token_ids": sampler_output.sampled_token_ids[
+                        0
+                    ].cpu().tolist(),
+                    "accepted_node_indices": (
+                        sampler_output.accepted_token_indices[0].cpu().tolist()
+                    ),
+                    "target_input_ids": self.input_ids.gpu[
+                        query_start:query_end
+                    ].cpu().tolist(),
+                    "target_positions": positions[
+                        query_start:query_end
+                    ].cpu().tolist(),
+                    "actual_seq_lengths_q": (
+                        first_attn_metadata.actual_seq_lengths_q
+                    ),
+                    "seq_lens": first_attn_metadata.seq_lens_list,
+                    "slot_mapping": spec_decode_common_attn_metadata.slot_mapping[
+                        query_start:query_end
+                    ].cpu().tolist(),
+                    "block_table": first_attn_metadata.block_tables[0].cpu().tolist(),
+                    "tree_mask_ptr": self._current_tree_attn_mask.data_ptr(),
+                    "tree_mask_allowed": [
+                        (~row).nonzero(as_tuple=False).flatten().tolist()
+                        for row in tree_mask
+                    ],
+                }
+                with open(tree_debug_path, "a", encoding="utf-8") as debug_file:
+                    debug_file.write(
+                        json.dumps(debug_record, separators=(",", ":")) + "\n"
+                    )
+            self._compact_tree_verification_state(
+                sampler_output.accepted_token_indices,
+                spec_decode_common_attn_metadata,
+                hidden_states,
+                positions,
+            )
+
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
@@ -2534,19 +2997,50 @@ class NPUModelRunner(GPUModelRunner):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
-                sampled_token_ids,
-                self.input_batch.sampling_metadata,
-                scheduler_output,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
-                positions,
-                scheduler_output.total_num_scheduled_tokens,
-                hidden_states,
-                aux_hidden_states,
-                sample_hidden_states,
-                batch_desc,
+            skip_eagle_drafter = (
+                torch.is_tensor(sampled_token_ids)
+                and self._should_skip_eagle_drafter()
             )
+            if skip_eagle_drafter:
+                self._draft_token_ids = self._propose_fixed_eagle_candidates(
+                    sampled_token_ids
+                )
+            else:
+                self._draft_token_ids = self.propose_draft_token_ids(
+                    sampled_token_ids,
+                    self.input_batch.sampling_metadata,
+                    scheduler_output,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                    positions,
+                    scheduler_output.total_num_scheduled_tokens,
+                    hidden_states,
+                    aux_hidden_states,
+                    sample_hidden_states,
+                    batch_desc,
+                )
+            if torch.is_tensor(sampled_token_ids) and torch.is_tensor(
+                self._draft_token_ids
+            ):
+                self._draft_token_ids = self._replace_post_eos_eagle_candidates(
+                    sampled_token_ids, self._draft_token_ids
+                )
+            benchmark_selected_drafts = os.getenv(
+                "VLLM_ASCEND_SPEC_BENCHMARK_SELECTED_DRAFTS"
+            )
+            if benchmark_selected_drafts and torch.is_tensor(
+                self._draft_token_ids
+            ):
+                selected = int(benchmark_selected_drafts)
+                if not 0 <= selected <= self._draft_token_ids.shape[1]:
+                    raise ValueError(
+                        "VLLM_ASCEND_SPEC_BENCHMARK_SELECTED_DRAFTS must "
+                        "be between zero and the generated draft-pool size"
+                    )
+                # The full fixed candidate pool has already been generated by
+                # the draft model. Only this prefix is submitted to the
+                # scheduler for the next target verification.
+                self._draft_token_ids = self._draft_token_ids[:, :selected]
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         (
@@ -2564,7 +3058,13 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
-
+        selection_seconds = 0.0
+        if benchmark_probe_path:
+            torch.npu.synchronize()
+            selection_seconds = time.perf_counter() - getattr(
+                self, "_benchmark_selection_started", time.perf_counter()
+            )
+            draft_started = time.perf_counter()
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 use_padded_batch = (
@@ -2591,6 +3091,57 @@ class NPUModelRunner(GPUModelRunner):
             # draft model runs so KV pool save/put can complete.
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
+
+        draft_seconds = 0.0
+        if benchmark_probe_path:
+            torch.npu.synchronize()
+            draft_seconds = time.perf_counter() - draft_started
+            proposed_tokens = (
+                sum(spec_decode_metadata.num_draft_tokens)
+                if spec_decode_metadata is not None
+                else 0
+            )
+            accepted_tokens = 0
+            if sampler_output.accepted_token_indices is not None:
+                accepted_tokens = int(
+                    (sampler_output.accepted_token_indices >= 0).sum().item()
+                )
+            record = {
+                "timestamp": time.time(),
+                "target_seconds": target_seconds,
+                "selection_seconds": selection_seconds,
+                "draft_seconds": draft_seconds,
+                "is_verification": spec_decode_metadata is not None,
+                "num_requests": self.input_batch.num_reqs,
+                "proposed_tokens": proposed_tokens,
+                "accepted_tokens": accepted_tokens,
+                "verification_rounds": sum(
+                    count > 0
+                    for count in (
+                        spec_decode_metadata.num_draft_tokens
+                        if spec_decode_metadata is not None
+                        else []
+                    )
+                ),
+                "verification_nodes": (
+                    scheduler_output.total_num_scheduled_tokens
+                    if spec_decode_metadata is not None
+                    else 0
+                ),
+                "verification_nodes_per_request": (
+                    [
+                        int(scheduler_output.num_scheduled_tokens[req_id])
+                        for req_id in scheduler_output.num_scheduled_tokens
+                    ]
+                    if spec_decode_metadata is not None
+                    else []
+                ),
+                "aclgraph_runtime_mode": getattr(
+                    self, "_benchmark_cudagraph_mode", "NONE"
+                ),
+            }
+            with open(benchmark_probe_path, "a", encoding="utf-8") as probe:
+                probe.write(json.dumps(record, separators=(",", ":")) + "\n")
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -2706,6 +3257,57 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
         )
         return sampler_output
+
+    def _compact_tree_verification_state(
+        self,
+        accepted_node_indices: torch.Tensor,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        """Commit a non-contiguous accepted tree path to linear vLLM slots."""
+        from vllm_ascend.spec_decode.tree_kv import move_kv_cache_slots
+
+        batch_size, max_depth = accepted_node_indices.shape
+        query_starts = common_attn_metadata.query_start_loc[:batch_size].to(
+            torch.long
+        )
+        destination_queries = query_starts.unsqueeze(1) + 1 + torch.arange(
+            max_depth,
+            dtype=torch.long,
+            device=accepted_node_indices.device,
+        ).unsqueeze(0)
+        source_queries = (
+            query_starts.unsqueeze(1)
+            + 1
+            + accepted_node_indices.to(torch.long)
+        )
+        # Invalid path entries and already-linear entries become harmless
+        # self-copies. Keeping a fixed tensor shape avoids per-request NPU-to-CPU
+        # synchronization and dynamic boolean indexing in every decode step.
+        source_queries = torch.where(
+            accepted_node_indices >= 0,
+            source_queries,
+            destination_queries,
+        ).reshape(-1)
+        destination_queries = destination_queries.reshape(-1)
+        slot_mapping = common_attn_metadata.slot_mapping
+        source_slots = slot_mapping[source_queries]
+        destination_slots = slot_mapping[destination_queries]
+        move_kv_cache_slots(self.kv_caches, source_slots, destination_slots)
+
+        # The padded drafter consumes the front, linear portion of these
+        # tensors. Gather the chosen path there before it prepares its inputs.
+        input_values = torch.index_select(
+            self.input_ids.gpu, 0, source_queries
+        )
+        self.input_ids.gpu.index_copy_(
+            0, destination_queries, input_values
+        )
+        hidden_values = torch.index_select(hidden_states, 0, source_queries)
+        hidden_states.index_copy_(0, destination_queries, hidden_values)
+        position_values = torch.index_select(positions, 0, source_queries)
+        positions.index_copy_(0, destination_queries, position_values)
 
     def _project_pearl_target_logits(self, logits: torch.Tensor | None) -> torch.Tensor | None:
         """Crop a verified PEARL target vocabulary before sampling logits."""
@@ -3049,7 +3651,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_active_loras=num_active_loras,
             )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+            num_tokens_padded, use_cascade_attn or has_encoder_output
+        )
         num_tokens_padded = batch_descriptor.num_tokens
         if enable_sp(self.vllm_config):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
@@ -3248,6 +3852,7 @@ class NPUModelRunner(GPUModelRunner):
             slot_mapping=slot_mapping_gid_0,
             slot_mapping_cpu=self.cpu_slot_mapping,
             causal=True,
+            tree_attn_mask=getattr(self, "_current_tree_attn_mask", None),
             is_prefilling=is_prefilling,
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
@@ -3553,6 +4158,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
+            self._current_tree_attn_mask = (
+                self._build_dummy_tree_attention_mask(num_reqs_padded, max_query_len)
+                if uniform_decode and cudagraph_runtime_mode == CUDAGraphMode.FULL
+                else None
+            )
             # The reason why we use a fixed seq_len rather than max_query_len is that
             # _npu_paged_attention_get_workspace only returns max workspace with specific
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len

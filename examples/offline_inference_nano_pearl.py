@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 from vllm_ascend.spec_decode.pearl import PEARLConfig, PEARLEngine, SamplingParams
 
@@ -23,10 +24,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--ignore-eos", action="store_true")
+    parser.add_argument("--slo-tpot-ms", type=float)
+    parser.add_argument("--slo-class")
+    parser.add_argument("--enable-spec-rhythm", action="store_true")
+    parser.add_argument("--spec-rhythm-min-gamma", type=int, default=1)
+    parser.add_argument("--spec-rhythm-max-eager-tokens", type=int, default=0)
+    parser.add_argument("--spec-rhythm-urgency-threshold", type=float, default=0.75)
+    parser.add_argument("--spec-rhythm-acceptance-floor", type=float, default=0.4)
+    parser.add_argument("--spec-rhythm-acceptance-ema-alpha", type=float, default=0.2)
+    parser.add_argument("--spec-rhythm-request-max-gamma", type=int)
+    parser.add_argument("--spec-rhythm-draft-token-budget", type=int)
+    parser.add_argument("--spec-rhythm-roofline", type=json.loads)
+    parser.add_argument("--disable-cpu-binding", action="store_true")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--mode", choices=("pearl", "target-ar", "bench"), default="pearl")
     parser.add_argument("--num-pearl-steps", type=int, default=100)
     parser.add_argument("--worker-timeout-seconds", type=float, default=300.0)
+    parser.add_argument("--profile-decode-steps", type=int, default=0)
+    parser.add_argument("--profile-only", action="store_true")
+    parser.add_argument(
+        "--print-metrics",
+        action="store_true",
+        help="Print per-request decode, SLO, and SpecRhythm metrics as JSON.",
+    )
     parser.add_argument("prompt", nargs="+", help="One or more prompts to generate.")
     return parser.parse_args()
 
@@ -44,14 +64,30 @@ def main() -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         num_kvcache_blocks=args.num_kvcache_blocks,
         max_aclgraph_entries=args.max_aclgraph_entries,
+        enable_cpu_binding=not args.disable_cpu_binding,
         enforce_eager=args.enforce_eager,
         gamma=args.gamma,
+        enable_continuous_batching=args.enable_spec_rhythm,
+        enable_preemptive_scheduling=args.enable_spec_rhythm,
+        enable_spec_rhythm=args.enable_spec_rhythm,
+        spec_rhythm_min_gamma=args.spec_rhythm_min_gamma,
+        spec_rhythm_max_eager_tokens=args.spec_rhythm_max_eager_tokens,
+        spec_rhythm_urgency_threshold=args.spec_rhythm_urgency_threshold,
+        spec_rhythm_acceptance_floor=args.spec_rhythm_acceptance_floor,
+        spec_rhythm_acceptance_ema_alpha=args.spec_rhythm_acceptance_ema_alpha,
+        spec_rhythm_roofline=args.spec_rhythm_roofline,
+        spec_rhythm_draft_token_budget=args.spec_rhythm_draft_token_budget,
+        profile_decode_steps=args.profile_decode_steps,
+        stop_after_profiled_decode_steps=args.profile_only,
         worker_timeout_seconds=args.worker_timeout_seconds,
     )
     sampling_params = SamplingParams(
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         ignore_eos=args.ignore_eos,
+        slo_tpot_ms=args.slo_tpot_ms,
+        slo_class=args.slo_class,
+        spec_rhythm_max_gamma=args.spec_rhythm_request_max_gamma,
     )
     with PEARLEngine(config) as engine:
         for prompt in args.prompt:
@@ -63,6 +99,8 @@ def main() -> None:
         else:
             outputs = engine.bench_generate(args.num_pearl_steps)
     print(outputs)
+    if args.print_metrics:
+        print(json.dumps(engine.last_metrics, ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":

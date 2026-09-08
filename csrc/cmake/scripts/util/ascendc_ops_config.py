@@ -282,7 +282,10 @@ def gen_all_config(root_dir, soc, out_dir, skip_binary_info_config, op_range="al
 
     if op_range != "relocatable":
         for _json in all_json_files:
-            file_path = soc + _json.split(soc, maxsplit=1)[1]
+            # Kernel artifacts are installed below ``kernel/<soc>``.  The
+            # build tree has one extra ``bin`` component which must not leak
+            # into the packaged runtime path.
+            file_path = os.path.join(soc, os.path.relpath(_json, root_dir))
             with open(_json, "r+") as f:
                 data = json.load(f)
                 data["filePath"] = file_path

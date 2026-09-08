@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import json
+import os
+import time
 import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -37,6 +40,15 @@ _STREAM_RESOURCE_GUIDANCE = (
     "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
     "temporarily disabling graph mode to confirm the failure is capture-related."
 )
+
+
+def _record_aclgraph_benchmark_event(event: str, **fields: Any) -> None:
+    path = os.getenv("VLLM_ASCEND_ACLGRAPH_BENCHMARK_JSONL")
+    if not path:
+        return
+    record = {"timestamp": time.time(), "event": event, **fields}
+    with open(path, "a", encoding="utf-8") as probe:
+        probe.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -151,6 +163,13 @@ class ACLGraphWrapper:
     def clear_graphs(self) -> None:
         self.concrete_aclgraph_entries.clear()
 
+    def _needs_replay_sync(self) -> bool:
+        # Draft replay is already ordered after target work on the same stream.
+        # Target replay still needs the barrier because runtime attention
+        # metadata (including tree masks) is copied immediately beforehand.
+        is_draft_eagle = self.use_eagle and _EXTRA_CTX.is_draft_model
+        return self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -163,6 +182,18 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            if aclgraph_runtime_mode == CUDAGraphMode.NONE:
+                _record_aclgraph_benchmark_event(
+                    "eager_fallback",
+                    wrapper_mode=self.runtime_mode.name,
+                    is_draft=bool(_EXTRA_CTX.is_draft_model),
+                    is_capturing=bool(getattr(forward_context, "capturing", False)),
+                    batch_descriptor=str(batch_descriptor),
+                    num_tokens=getattr(forward_context, "num_tokens", None),
+                    num_actual_tokens=getattr(
+                        forward_context, "num_actual_tokens", None
+                    ),
+                )
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -241,6 +272,12 @@ class ACLGraphWrapper:
             entry.aclgraph = aclgraph
 
             compilation_counter.num_cudagraph_captured += 1
+            _record_aclgraph_benchmark_event(
+                "capture",
+                wrapper_mode=self.runtime_mode.name,
+                is_draft=bool(_EXTRA_CTX.is_draft_model),
+                batch_descriptor=str(entry.batch_descriptor),
+            )
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
@@ -265,12 +302,17 @@ class ACLGraphWrapper:
         # If we do not in main model and in full-graph mode when using merge-eagle-graph,
         # we do not need to synchronize.
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
-        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
-        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
+        # When FULL + EAGLE target/draft (merge path), replay does not need this
+        # barrier because both graphs are ordered on the same stream.
+        if not self.enable_enpu and self._needs_replay_sync():
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()
+        _record_aclgraph_benchmark_event(
+            "replay",
+            wrapper_mode=self.runtime_mode.name,
+            is_draft=bool(_EXTRA_CTX.is_draft_model),
+            batch_descriptor=str(entry.batch_descriptor),
+        )
         return entry.output
 
 

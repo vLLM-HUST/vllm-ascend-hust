@@ -44,10 +44,15 @@ extern "C" __global__ __aicore__ void matmul_allreduce_add_rmsnorm(
     }
 
     if ASCEND_IS_AIV {
-        MatmulAllreduceAddRmsnormAivKernel<DTYPE_X1, DTYPE_Y> op;
-
-        op.Init(x1, x2, residual, gamma, y, add_out, workspace, &tiling_data, hccl_);
-        op.Process(&tiling_data);
+        if (tiling_data.matmulAllreduceAddRmsnormInfo.ppTilingData.isGatherAddOut) {
+            MatmulAllreduceAddRmsnormAivKernel<DTYPE_X1, DTYPE_Y, true> op;
+            op.Init(x1, x2, residual, gamma, y, add_out, workspace, &tiling_data, hccl_);
+            op.Process(&tiling_data);
+        } else {
+            MatmulAllreduceAddRmsnormAivKernel<DTYPE_X1, DTYPE_Y, false> op;
+            op.Init(x1, x2, residual, gamma, y, add_out, workspace, &tiling_data, hccl_);
+            op.Process(&tiling_data);
+        }
         return;
     }
 }

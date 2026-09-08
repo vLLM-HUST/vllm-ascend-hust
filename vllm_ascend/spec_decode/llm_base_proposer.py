@@ -171,6 +171,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
+        tree_width = getattr(self.speculative_config, "tree_width", None)
+        tree_depth = getattr(self.speculative_config, "tree_depth", None)
+        self.tree_width = tree_width if isinstance(tree_width, int) else None
+        self.tree_depth = tree_depth if isinstance(tree_depth, int) else None
+        self.tree_drafting = self.tree_width is not None
+        if self.tree_drafting:
+            if self.tree_depth is None:
+                raise ValueError("tree_width and tree_depth must be set together")
+            if self.tree_width * self.tree_depth != self.num_speculative_tokens:
+                raise ValueError(
+                    "num_speculative_tokens must equal tree_width * tree_depth"
+                )
+        self.num_draft_steps = (
+            self.tree_depth if self.tree_drafting else self.num_speculative_tokens
+        )
+        assert self.num_draft_steps is not None
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
@@ -247,17 +263,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         slot_mapping_lens = self.runner.max_num_tokens + 2 * self.pcp_size * self.runner.max_num_reqs
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)
+            for _ in range(self.num_draft_steps)
         ]
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)
+            for _ in range(self.num_draft_steps)
         ]
         self.query_start_loc_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
-            for _ in range(self.num_speculative_tokens)
+            for _ in range(self.num_draft_steps)
         ]
 
         # pcp needs independent block table tensor in step=0 and step>0, and the following is for step>0
@@ -333,7 +349,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         self.piece_all_attn_layer_name = []
-        for _ in range(self.num_speculative_tokens):
+        for _ in range(self.num_draft_steps):
             self.piece_all_attn_layer_name.append([name for name in self.attn_layer_names])
 
         if supports_multimodal(model):
@@ -618,7 +634,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             builder = self.draft_attn_groups[0].get_metadata_builder()
             kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
             # update the tensor's address for each step.
-            for draft_index in range(self.num_speculative_tokens):
+            for draft_index in range(self.num_draft_steps):
                 common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
                 extra_attn_metadata_args: dict = {}
                 if self.use_compress:
@@ -814,13 +830,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
+            graph_num_reqs = (
+                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs
+            )
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:] - common_attn_metadata.query_start_loc_cpu[:-1]
+            )
+            if not torch.all(query_lens_cpu == self.runner.uniform_decode_query_len).item():
+                # Draft-model input expansion can produce a query length that
+                # differs from the target runner's uniform graph stride. Treat
+                # it as a mixed batch so the dummy request ends exactly at the
+                # captured token count.
+                graph_num_reqs = common_attn_metadata.num_reqs
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 self.query_start_loc,
                 num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
+                graph_num_reqs,
                 common_attn_metadata.num_reqs,
                 aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
+                graph_num_reqs,
             )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
@@ -984,7 +1012,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # Copy the old attn_metadata and update
                 if not self.parallel_drafting:
-                    for draft_index in range(1, self.num_speculative_tokens):
+                    for draft_index in range(1, self.num_draft_steps):
                         per_layer_attn_metadata = dict()
                         for attn_group in self.draft_attn_groups:
                             common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
@@ -1006,7 +1034,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             # Copy the old attn_metadata and update
             if not self.parallel_drafting:
-                for draft_index in range(1, self.num_speculative_tokens):
+                for draft_index in range(1, self.num_draft_steps):
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
@@ -1182,6 +1210,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
+        logits = None
         if get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
@@ -1198,7 +1227,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if lmhead_tp_enable():
                     logits = get_lmhead_tp_group().all_to_all(logits)
                 else:
-                    logits = self.model.model.logits_processor._gather_logits(logits)
+                    logits = self.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable():
                     logits, token_indices_to_sample = self._align_tensor_and_indices(
                         logits,
@@ -1207,7 +1236,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         ori_token_indices_to_sample,
                         is_logits=True,
                     )
-                draft_token_ids = logits.argmax(dim=-1)
+                if not self.tree_drafting or self.tree_width == 1:
+                    draft_token_ids = logits.argmax(dim=-1)
         else:
             logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable():
@@ -1218,7 +1248,41 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     ori_token_indices_to_sample,
                     is_logits=True,
                 )
-            draft_token_ids = logits.argmax(dim=-1)
+            if not self.tree_drafting or self.tree_width == 1:
+                draft_token_ids = logits.argmax(dim=-1)
+
+        if self.method == "draft_model" and self.use_heterogeneous_vocab:
+            assert logits is not None and self.vocab_mapping is not None
+            logits = self.vocab_mapping.constrain_draft_logits_(logits)
+            if not self.tree_drafting or self.tree_width == 1:
+                draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
+                    logits.argmax(dim=-1)
+                )
+
+        tree_tokens = None
+        if self.tree_drafting:
+            assert self.tree_width is not None and self.tree_depth is not None
+            if self.method not in ("draft_model", "eagle"):
+                raise ValueError(
+                    "tree speculative decoding currently supports draft_model "
+                    "and EAGLE only"
+                )
+            if self.tree_width == 1:
+                first_level_tokens = draft_token_ids.unsqueeze(-1)
+            else:
+                first_level_tokens = logits.topk(self.tree_width, dim=-1).indices
+            if self.use_heterogeneous_vocab and self.tree_width > 1:
+                assert self.vocab_mapping is not None
+                first_level_tokens = self.vocab_mapping.map_draft_to_target_ids(
+                    first_level_tokens
+                )
+            tree_tokens = torch.empty(
+                (self.tree_depth, *first_level_tokens.shape),
+                dtype=first_level_tokens.dtype,
+                device=self.device,
+            )
+            tree_tokens[0] = first_level_tokens
+            draft_token_ids = tree_tokens[0, :, 0]
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1240,10 +1304,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             batch_size = draft_token_ids.shape[0]
 
         # Generate the remaining draft tokens.
-        draft_token_ids_tensor = torch.zeros(
-            (self.num_speculative_tokens, *draft_token_ids.shape), dtype=draft_token_ids.dtype, device=self.device
-        )
-        draft_token_ids_tensor[0] = draft_token_ids
+        draft_token_ids_tensor = None
+        if not self.tree_drafting:
+            draft_token_ids_tensor = torch.zeros(
+                (self.num_draft_steps, *draft_token_ids.shape),
+                dtype=draft_token_ids.dtype,
+                device=self.device,
+            )
+            draft_token_ids_tensor[0] = draft_token_ids
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
         else:
@@ -1257,7 +1325,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         _EXTRA_CTX.num_tokens = input_batch_size
         _EXTRA_CTX.num_accept_tokens = batch_size
 
-        for draft_index in range(self.num_speculative_tokens - 1):
+        for draft_index in range(self.num_draft_steps - 1):
             # Reset MOE layer index for each draft step iteration
             forward_context = get_forward_context()
             if forward_context is not None:
@@ -1266,7 +1334,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
-            input_ids = draft_token_ids_tensor[draft_index]
+            if self.tree_drafting:
+                assert tree_tokens is not None
+                input_ids = tree_tokens[draft_index, :, 0]
+            else:
+                assert draft_token_ids_tensor is not None
+                input_ids = draft_token_ids_tensor[draft_index]
+            if self.method == "draft_model" and self.use_heterogeneous_vocab:
+                assert self.vocab_mapping is not None
+                input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
             positions += 1
 
             # NOTE(woosuk): We should handle the case where the draft model
@@ -1355,24 +1431,60 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if lmhead_tp_enable():
                         logits = get_lmhead_tp_group().all_to_all(logits)
                     else:
-                        logits = self.model.model.logits_processor._gather_logits(logits)
+                        logits = self.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
                         logits = logits[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids = logits.argmax(dim=-1)
+                    if not self.tree_drafting or self.tree_width == 1:
+                        draft_token_ids = logits.argmax(dim=-1)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids = logits.argmax(dim=-1)
+                if not self.tree_drafting or self.tree_width == 1:
+                    draft_token_ids = logits.argmax(dim=-1)
+
+            if self.method == "draft_model" and self.use_heterogeneous_vocab:
+                assert logits is not None and self.vocab_mapping is not None
+                logits = self.vocab_mapping.constrain_draft_logits_(logits)
+                if not self.tree_drafting or self.tree_width == 1:
+                    draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
+                        logits.argmax(dim=-1)
+                    )
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids_tensor[draft_index + 1] = draft_token_ids
+            if self.tree_drafting:
+                assert tree_tokens is not None and self.tree_width is not None
+                if self.tree_width == 1:
+                    next_level_tokens = draft_token_ids.unsqueeze(-1)
+                else:
+                    next_level_tokens = logits.topk(self.tree_width, dim=-1).indices
+                if self.use_heterogeneous_vocab and self.tree_width > 1:
+                    assert self.vocab_mapping is not None
+                    next_level_tokens = self.vocab_mapping.map_draft_to_target_ids(
+                        next_level_tokens
+                    )
+                tree_tokens[draft_index + 1] = next_level_tokens
+                draft_token_ids = tree_tokens[draft_index + 1, :, 0]
+            if draft_token_ids_tensor is not None:
+                draft_token_ids_tensor[draft_index + 1] = draft_token_ids
 
         # [batch_size, num_speculative_tokens]
-        draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
+        if self.tree_drafting:
+            assert tree_tokens is not None
+            # Keep the top-1 continuation spine contiguous so its accepted KV
+            # path is already in linear order. Remaining per-level candidates
+            # are leaf siblings and follow the spine.
+            spine = tree_tokens[:, :, 0].transpose(0, 1)
+            siblings = tree_tokens[:, :, 1:].permute(1, 0, 2).reshape(
+                tree_tokens.shape[1], -1
+            )
+            draft_token_ids = torch.cat((spine, siblings), dim=1)
+        else:
+            assert draft_token_ids_tensor is not None
+            draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
         return draft_token_ids
 
     def set_inputs_first_pass(
@@ -1389,6 +1501,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_prefill_reqs=0,
         num_decode_reqs=0,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata, tuple[Any, Any] | None]:
+        if self.method == "draft_model" and self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                target_token_ids
+            )
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                next_token_ids
+            )
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -1552,8 +1672,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             assert len(self.draft_attn_groups) > 0
             block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
 
+            # Target ACLGraphs retain padded block-table rows after requests
+            # finish, while the remaining metadata already tracks only the
+            # active batch. Upstream slot mapping requires matching row counts.
+            active_cad = cad
+            if cad.block_table_tensor.shape[0] != batch_size:
+                active_cad = cad.replace(block_table_tensor=cad.block_table_tensor[:batch_size])
             new_slot_mapping = compute_new_slot_mapping(
-                cad=cad,
+                cad=active_cad,
                 new_positions=self.positions[:total_num_output_tokens],
                 is_rejected_token_mask=self.is_rejected_token_mask[:total_num_output_tokens],
                 block_size=block_size,
@@ -1563,7 +1689,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # 3. Update the common attention metadata with the new (meta)data
             new_cad = extend_all_queries_by_N(
-                cad,
+                active_cad,
                 N=self.net_num_new_slots_per_request,
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,

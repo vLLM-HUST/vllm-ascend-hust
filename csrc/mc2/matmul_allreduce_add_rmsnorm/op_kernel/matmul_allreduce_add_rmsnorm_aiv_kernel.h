@@ -78,11 +78,11 @@ __aicore__ void CopyGmToUbufAlignB16(__ubuf__ T *dst, __gm__ T *src, uint16_t nB
     DataCopyPad(ubTensor, gmTensor, dataCopyParams, padParams);
 }
 
-template <typename MmadDtype, typename OutDtype>
+template <typename MmadDtype, typename OutDtype, bool GatherAddOut>
 class MatmulAllreduceAddRmsnormAivKernel {
 
 public:
-    __aicore__ inline MatmulAllreduceAddRmsnormAivKernel<MmadDtype, OutDtype>() { }
+    __aicore__ inline MatmulAllreduceAddRmsnormAivKernel<MmadDtype, OutDtype, GatherAddOut>() { }
     __aicore__ inline void Init(GM_ADDR x1, GM_ADDR x2, GM_ADDR residual, GM_ADDR gamma, GM_ADDR y, GM_ADDR add_out,
         GM_ADDR workspace, const MatmulAllreduceAddRmsnormTilingData *tilingData,
         Hccl<HCCL_SERVER_TYPE_AICPU> &hccl_)
@@ -130,8 +130,6 @@ public:
         quant_granularity = static_cast<QuantGranularity>(quantInfo->quantGranularity);
         quant_group_size = quantInfo->quantGroupSize;
         epsilon = tilingData->matmulAllreduceAddRmsnormInfo.rmsnormTilingData.epsilon;
-        is_gather_add_out = tilingData->matmulAllreduceAddRmsnormInfo.ppTilingData.isGatherAddOut;
-
         swizzl_direct = (tiling_key & SWIZZL_MASK) ? true : false;
         trans_a = ppTilingData->isTransA;
         trans_b = ppTilingData->isTransB;
@@ -156,7 +154,7 @@ public:
         uint32_t step1_ub_usage = AscendC::AlignUp(
             n * sizeof(MmadDtype) +
             2 * (rank_size * DIFUSION_ADD_LEN * sizeof(MmadDtype)) +
-            n * sizeof(MmadDtype) +
+            (GatherAddOut ? n * sizeof(MmadDtype) : 0) +
             n * sizeof(MmadDtype) +
             n * sizeof(float) +
             n * sizeof(float) +
@@ -173,7 +171,9 @@ public:
 
         step1BufPool.InitBuffer(inQueueX, 1, n * sizeof(MmadDtype));
         step1BufPool.InitBuffer(inQueueY, 2, rank_size * DIFUSION_ADD_LEN * sizeof(MmadDtype));
-        step1BufPool.InitBuffer(addOutQueue, 1, n * sizeof(MmadDtype));
+        if constexpr (GatherAddOut) {
+            step1BufPool.InitBuffer(addOutQueue, 1, n * sizeof(MmadDtype));
+        }
         step1BufPool.InitBuffer(outQueue, 1, n * sizeof(MmadDtype));
         step1BufPool.InitBuffer(xFp32Buf, n * sizeof(float));
         step1BufPool.InitBuffer(sqxBuf, n * sizeof(float));
@@ -193,7 +193,9 @@ public:
 
         ResetIpcFlags(FLAG_NUM);
         CrossRankSyncEx(FLAG_NUM);
-        constexpr int32_t allreduce_used_core = 16;
+        // Every rank must own the same number of gather cores. Using all 16
+        // cores for TP3 maps core 15 to a non-existent fourth rank.
+        const int32_t allreduce_used_core = (16 / rank_size) * rank_size;
         int32_t one_comm_count = swizzl_count;
         int32_t loop_num_per_comm = one_comm_count * n_loop;
         int32_t comm_count = DivCeil(core_loop, loop_num_per_comm);
@@ -244,7 +246,7 @@ public:
                 CrossRankSyncV2(FLAG_TWO_IDX, cal_idx + 1);
                 SetAndWaitAivSync(flag_idx);
 
-                if (is_gather_add_out) {
+                if constexpr (GatherAddOut) {
                     if (filter_core_cond && gather_rank_id == rank) {
                         ParallelAllGather(gm_share_buff, gm_add_output, core_offset_m * n, m_cur_core * n);
                     }
@@ -496,13 +498,15 @@ private:
             }
             inQueueX.FreeTensor(x_local);
 
-            // copy add result out
-            LocalTensor<MmadDtype> add_out = addOutQueue.AllocTensor<MmadDtype>();
-            Cast(add_out, x_fp32, RoundMode::CAST_RINT, n);
-            addOutQueue.EnQue(add_out);
-            add_out = addOutQueue.DeQue<MmadDtype>();
-            DataCopy(add_out_global[i * n], add_out, n);
-            addOutQueue.FreeTensor(add_out);
+            if constexpr (GatherAddOut) {
+                // copy add result out
+                LocalTensor<MmadDtype> add_out = addOutQueue.AllocTensor<MmadDtype>();
+                Cast(add_out, x_fp32, RoundMode::CAST_RINT, n);
+                addOutQueue.EnQue(add_out);
+                add_out = addOutQueue.DeQue<MmadDtype>();
+                DataCopy(add_out_global[i * n], add_out, n);
+                addOutQueue.FreeTensor(add_out);
+            }
 
             LocalTensor<MmadDtype> gamma_local = gammaBuf.Get<MmadDtype>();
             LocalTensor<MmadDtype> out_local = outQueue.AllocTensor<MmadDtype>();
@@ -650,7 +654,6 @@ private:
     bool trans_b;
     bool is_int8;
     bool is_91093;
-    bool is_gather_add_out;
 
     int32_t aiv_idx;
     int32_t other_rank;

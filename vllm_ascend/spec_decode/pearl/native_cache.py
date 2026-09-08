@@ -100,14 +100,17 @@ class NativePrefixCache:
         if self._active_tables is None:
             return
         for table in self._active_tables:
-            for block_id in table:
-                if block_id == -1:
-                    continue
-                block = self._blocks[block_id]
-                block.ref_count -= 1
-                if block.ref_count < 0:
-                    raise RuntimeError("PEARL KV cache block reference count became negative.")
+            self._release_table(table)
         self._active_tables = None
+
+    def _release_table(self, table: list[int]) -> None:
+        for block_id in table:
+            if block_id == -1:
+                continue
+            block = self._blocks[block_id]
+            block.ref_count -= 1
+            if block.ref_count < 0:
+                raise RuntimeError("PEARL KV cache block reference count became negative.")
 
     def _acquire_block(self, prefix_key: tuple[int, ...] | None) -> tuple[int, bool]:
         self._clock += 1

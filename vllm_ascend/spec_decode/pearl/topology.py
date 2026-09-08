@@ -68,6 +68,11 @@ class PearlTopology:
         """Ranks receiving candidate proposals from the draft leader."""
         return (self.draft_leader_rank, *self.target_ranks)
 
+    @property
+    def correction_ranks(self) -> tuple[int, ...]:
+        """Ranks receiving corrections from the target leader."""
+        return (*self.draft_ranks, self.target_leader_rank)
+
     def validate_world_size(self, world_size: int) -> None:
         """Ensure a torch distributed world can realize this rank layout."""
         expected_ranks = set(range(world_size))
@@ -100,10 +105,11 @@ class PearlProcessGroups:
     draft_group: dist.ProcessGroup
     target_group: dist.ProcessGroup
     verification_group: dist.ProcessGroup
+    correction_group: dist.ProcessGroup
 
     @classmethod
     def create(cls, topology: PearlTopology, backend: str | None = None) -> PearlProcessGroups:
-        """Create draft, target, and cross-model verification groups.
+        """Create model-parallel and cross-model PEARL groups.
 
         Args:
             topology: Complete PEARL rank layout.
@@ -126,6 +132,7 @@ class PearlProcessGroups:
         draft_group = dist.new_group(ranks=list(topology.draft_ranks), backend=selected_backend)
         target_group = dist.new_group(ranks=list(topology.target_ranks), backend=selected_backend)
         verification_group = dist.new_group(ranks=list(topology.verification_ranks), backend=selected_backend)
+        correction_group = dist.new_group(ranks=list(topology.correction_ranks), backend=selected_backend)
 
         return cls(
             topology=topology,
@@ -133,6 +140,7 @@ class PearlProcessGroups:
             draft_group=draft_group,
             target_group=target_group,
             verification_group=verification_group,
+            correction_group=correction_group,
         )
 
     @property

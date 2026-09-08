@@ -434,6 +434,9 @@ static ge::graphStatus GetAttrAndSetTilingData(
     ppTilingData.isTransA = false;
     ppTilingData.isTransB = isTransB;
     ppTilingData.isGatherAddOut = *(attrs->GetAttrPointer<bool>(ATTR_IS_GATHER_ADD_OUT_INDEX));
+    auto weightFormat = static_cast<ge::Format>(
+        ge::GetPrimaryFormat(context->GetInputDesc(DIM_INDEX_ONE)->GetStorageFormat()));
+    ppTilingData.weightNz = weightFormat == ge::FORMAT_FRACTAL_NZ;
 
     auto &opShape = ppTilingData.opShape;
     auto &tensor0Shape = context->GetInputTensor(0)->GetOriginShape();
@@ -514,7 +517,8 @@ WorkspaceDetail GetWorkspaceDetail(CoCDataTypeDesc dataType, const MatMulInfo &m
     }
 
     bool hasDequant = quantInfo.dequantGranularity != QuantGranularity::QUANT_GRANULARITY_UNDEFINED;
-    if ((hasDequant && !mmInfo.isInt8) || !IsMatrixAligned(mmInfo.k, mmInfo.n, mmInfo.transB, nElemAlign)) {
+    if (!mmInfo.weightNz &&
+        ((hasDequant && !mmInfo.isInt8) || !IsMatrixAligned(mmInfo.k, mmInfo.n, mmInfo.transB, nElemAlign))) {
         workspaceDetail.matrixWeightSize =
             GetAlignedMatrixSize(mmInfo.batchSize, mmInfo.k, mmInfo.n, mmInfo.transB, nElemAlign) * eleSize;
     }
@@ -543,7 +547,7 @@ void GetMmInfo(gert::TilingContext *context, MatmulAllreduceAddRmsnormTilingData
     mmInfo->transA = false;
     mmInfo->transB = *(attrs->GetAttrPointer<bool>(ATTR_IS_TRANS_B_INDEX));
     mmInfo->withBias = false;
-    mmInfo->weightNz = false;
+    mmInfo->weightNz = tempPPTilingData.weightNz;
     mmInfo->isInt8 = context->GetInputTensor(0)->GetDataType() == ge::DT_INT8;
 }
 

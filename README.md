@@ -19,7 +19,16 @@ HUST-maintained Ascend/NPU plugin paired with vLLM-HUST
 <a href="README.zh.md"><b>中文</b></a> |
 </p>
 
-# vLLM-Ascend-HUST
+# vLLM-Ascend-SpecSLO
+
+本仓库是基于 vLLM-Ascend-HUST 的 Ascend/NPU SpecSLO 实现，包含
+nano-PEARL 原生运行时、树状投机解码基础设施、SLO 调度与 Ascend
+图/通信适配。完整的中文迁移记录见
+[`docs/specslo_work_record_zh.md`](docs/specslo_work_record_zh.md)。
+
+原 vLLM-Ascend-HUST 说明保留如下，便于安装、开发和追踪上游差异。
+
+## vLLM-Ascend-HUST
 
 `vLLM-Ascend-HUST` is the HUST-maintained fork of the
 [`vllm-project/vllm-ascend`](https://github.com/vllm-project/vllm-ascend)

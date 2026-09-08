@@ -761,6 +761,32 @@ class TestACLGraphWrapper(TestBase):
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
 
+    def test_replay_sync_is_skipped_only_for_merged_eagle_draft(self):
+        eagle_wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options,
+            use_eagle=True,
+        )
+        regular_wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+
+        with patch.object(
+            acl_graph, "_EXTRA_CTX", MagicMock(is_draft_model=True)
+        ):
+            self.assertFalse(eagle_wrapper._needs_replay_sync())
+            self.assertTrue(regular_wrapper._needs_replay_sync())
+        with patch.object(
+            acl_graph, "_EXTRA_CTX", MagicMock(is_draft_model=False)
+        ):
+            self.assertTrue(eagle_wrapper._needs_replay_sync())
+            self.assertTrue(regular_wrapper._needs_replay_sync())
+
     def test_acl_graph_wrappers_use_weak_refs(self):
         self.assertIsInstance(acl_graph._acl_graph_wrappers, weakref.WeakSet)
 

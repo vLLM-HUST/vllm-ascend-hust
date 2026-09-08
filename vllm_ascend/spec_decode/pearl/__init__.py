@@ -16,6 +16,15 @@ from vllm_ascend.spec_decode.pearl.protocol import (
     broadcast_verifications,
 )
 from vllm_ascend.spec_decode.pearl.runtime import PearlRoundExecutor
+from vllm_ascend.spec_decode.pearl.spec_rhythm import (
+    PipelinePhase,
+    ProposalLifecycle,
+    SpecRhythmBudgetShaper,
+    SpecRhythmExecutionPlan,
+    SpecRhythmPipelineController,
+    SpecRhythmProposalTicket,
+    SpecRhythmRuntimeState,
+)
 from vllm_ascend.spec_decode.pearl.state import PearlPhase, PearlRequestState, advance_request_states
 from vllm_ascend.spec_decode.pearl.topology import PearlProcessGroups, PearlTopology
 from vllm_ascend.spec_decode.pearl.verifier import PearlTargetVerifier
@@ -35,6 +44,13 @@ __all__ = [
     "PearlVerificationBatch",
     "PearlVocabProjection",
     "SamplingParams",
+    "PipelinePhase",
+    "ProposalLifecycle",
+    "SpecRhythmBudgetShaper",
+    "SpecRhythmExecutionPlan",
+    "SpecRhythmPipelineController",
+    "SpecRhythmProposalTicket",
+    "SpecRhythmRuntimeState",
     "advance_request_states",
     "broadcast_proposals",
     "broadcast_verifications",

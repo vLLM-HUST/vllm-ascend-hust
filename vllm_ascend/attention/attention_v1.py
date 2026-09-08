@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 
@@ -205,6 +206,7 @@ class AscendMetadata:
     decode_meta: AscendMetadataForDecode | None = None
 
     causal: bool = True
+    tree_attention: bool = False
     # runner_type in model_config.
     model_runner_type: str = ""
     # prefill reshape_and_cache event
@@ -247,11 +249,25 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
-                npu_fused_infer_attention_score TND layout's limit of 16, \
-                got {self.decode_threshold}"
+            long_query_mode = os.getenv(
+                "VLLM_ASCEND_TREE_ROOFLINE_ALLOW_LONG_QUERY"
             )
+            if long_query_mode == "force_prefill":
+                # Benchmark control: route 16-token queries through the same
+                # long-query path used beyond the decode-kernel limit.
+                self.decode_threshold = min(self.decode_threshold, 15)
+            if self.decode_threshold > 16:
+                if long_query_mode == "1":
+                    # The TND decode kernel is limited to 16 query tokens.
+                    # Classify longer benchmark-only tree verification as a
+                    # prefill so it uses the long-query TND path instead.
+                    self.decode_threshold = 16
+                else:
+                    raise ValueError(
+                        "decode_threshold exceeded "
+                        "npu_fused_infer_attention_score TND layout's limit "
+                        f"of 16, got {self.decode_threshold}"
+                    )
 
         self.reorder_batch_threshold = self.decode_threshold
 
@@ -308,7 +324,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         attn_state = common_attn_metadata.attn_state
 
         # Get attn_mask from singleton AttentionMaskBuilder
-        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        tree_attn_mask = common_attn_metadata.tree_attn_mask
+        attn_mask = (
+            tree_attn_mask
+            if tree_attn_mask is not None
+            else self.attn_mask_builder.get_attention_mask(
+                common_attn_metadata.causal, self.model_config
+            )
+        )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -365,6 +388,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
+            tree_attention=tree_attn_mask is not None,
             model_runner_type=self.model_config.runner_type,
             kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
         )
@@ -563,8 +587,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ]
                 attn_keys = [key for _, key in draft_attn_key_steps]
             else:
-                graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
+                graph_params = get_graph_params()
                 attn_keys = list(attn_metadata.keys())
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
@@ -782,8 +806,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             sparse_mode = 0
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        runtime_metadata = attn_metadata[metadata_key]
+                        seq_lens = runtime_metadata.seq_lens_list
+                        actual_seq_lengths_q = runtime_metadata.actual_seq_lengths_q
+                        if runtime_metadata.tree_attention:
+                            attn_mask = runtime_metadata.attn_mask
+                            sparse_mode = 1
+                            pre_tokens = SWA_INT_MAX
+                            next_tokens = SWA_INT_MAX
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -793,7 +823,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
                         if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
-                            block_tables = attn_metadata[metadata_key].block_tables
+                            block_tables = runtime_metadata.block_tables
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -808,6 +838,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         }
                         input_layout = "BNSD"
                         sparse_mode = 0
+                    elif (
+                        not _EXTRA_CTX.is_draft_model
+                        and runtime_metadata.tree_attention
+                    ):
+                        extra_args = {"inner_precise": 2}
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -867,7 +902,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
+        sparse_mode = (
+            1
+            if attn_metadata.tree_attention
+            else 4
+            if self.sliding_window
+            else 3
+            if attn_metadata.causal
+            else 0
+        )
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
@@ -892,6 +935,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
+        elif attn_metadata.tree_attention:
+            extra_args = {"inner_precise": 2}
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
@@ -1331,7 +1376,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if not attn_metadata.causal:
+            if attn_metadata.tree_attention:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=1,
+                    inner_precise=2,
+                )
+            elif not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from multiprocessing import Pipe
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -7,20 +8,43 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from examples.benchmark_nano_pearl_speculative import (
+    _aggregate_decode_profile,
+    _parse_target_graph_post_counts,
+    _worker_aclgraph_deltas,
+)
+from examples.benchmark_nano_pearl_speculative import (
+    _build_parser as _build_benchmark_parser,
+)
+from examples.benchmark_nano_pearl_target_only import (
+    _build_parser as _build_target_only_benchmark_parser,
+)
 from vllm_ascend.spec_decode.pearl.api import PEARLConfig, PEARLEngine
 from vllm_ascend.spec_decode.pearl.native_cache import NativePrefixCache
 from vllm_ascend.spec_decode.pearl.native_engine import (
     NativePearlConfig,
     NativePearlEngine,
+    NativeSpecRhythmDevicePayload,
     PearlPipelineState,
     SamplingParams,
+    _bucket_target_verification_widths,
+    _bucket_variable_target_verification_widths,
     _build_greedy_verdict,
+    _build_greedy_verdict_with_layout,
     _build_parser,
     _build_stochastic_verdict,
+    _build_verification_layout,
+    _canonical_active_indices,
+    _continuous_bucket_indices,
+    _continuous_result_states,
     _finished,
     _gamma_from_decode_speeds,
     _normalize_sampling_params,
+    _restore_completed_states,
     _sample_logits,
+    _select_preemptive_continuous_indices,
+    _set_default_npu_environment,
+    _target_graph_precompile_shapes,
     _truncate_completion,
 )
 from vllm_ascend.spec_decode.pearl.native_graph import NativeACLGraphRunner
@@ -34,9 +58,237 @@ from vllm_ascend.spec_decode.pearl.native_model import (
     NativeRMSNorm,
     NativeRowLinear,
     NativeTPContext,
+    _maybe_convert_linear_weights_to_nz,
     load_native_qwen2_weights,
     prepare_native_model_config,
 )
+from vllm_ascend.spec_decode.pearl.topology import PearlTopology
+from vllm_ascend.spec_decode.pearl.spec_rhythm import SpecRhythmProposalTicket
+
+
+def test_pearl_defaults_to_tp3_deterministic_aiv_without_overriding_user_configuration():
+    with patch.dict(os.environ, {}, clear=True):
+        _set_default_npu_environment(target_tp_size=3)
+        assert os.environ["TASK_QUEUE_ENABLE"] == "1"
+        assert os.environ["HCCL_OP_EXPANSION_MODE"] == "AIV"
+        assert os.environ["HCCL_DETERMINISTIC"] == "true"
+
+        os.environ["HCCL_OP_EXPANSION_MODE"] = "user-mode"
+        os.environ["HCCL_DETERMINISTIC"] = "false"
+        os.environ["TASK_QUEUE_ENABLE"] = "0"
+        _set_default_npu_environment(target_tp_size=3)
+        assert os.environ["TASK_QUEUE_ENABLE"] == "0"
+        assert os.environ["HCCL_OP_EXPANSION_MODE"] == "user-mode"
+        assert os.environ["HCCL_DETERMINISTIC"] == "false"
+
+
+def test_pearl_does_not_force_deterministic_hccl_for_power_of_two_target_tp():
+    with patch.dict(os.environ, {}, clear=True):
+        _set_default_npu_environment(target_tp_size=4)
+        assert os.environ["TASK_QUEUE_ENABLE"] == "1"
+        assert os.environ["HCCL_OP_EXPANSION_MODE"] == "AIV"
+        assert "HCCL_DETERMINISTIC" not in os.environ
+
+
+def test_active_requests_are_canonicalized_by_verification_width():
+    states = [
+        PearlPipelineState([1], prompt_length=1, pre_verify=True),
+        PearlPipelineState([2], prompt_length=1, pre_verify=False),
+        PearlPipelineState([3], prompt_length=1, pre_verify=True),
+        PearlPipelineState([4], prompt_length=1, pre_verify=False),
+    ]
+
+    assert _canonical_active_indices(states, [0, 1, 2, 3]) == [1, 3, 0, 2]
+
+
+def test_target_verification_widths_are_quantized_without_exposing_padding():
+    widths, valid_indices = _bucket_target_verification_widths(
+        [False, False, False, *([True] * 13)],
+        gamma=4,
+        num_buckets=8,
+    )
+
+    assert widths == [4, 4, 4, 4, *([1] * 12)]
+    assert len(valid_indices) == 25
+    assert valid_indices[:13] == list(range(13))
+    assert valid_indices[13:] == list(range(16, 28))
+
+
+def test_variable_target_widths_retain_only_real_candidate_rows():
+    widths, valid_indices = _bucket_variable_target_verification_widths(
+        [4, 2, 1, 1], gamma=5, num_buckets=2
+    )
+    assert widths == [5, 5, 1, 1]
+    assert valid_indices == [0, 1, 2, 3, 5, 6, 10, 11]
+
+
+def test_target_graph_precompile_shapes_include_nondivisible_maximum():
+    shapes = _target_graph_precompile_shapes([5], gamma=4, num_buckets=2)
+
+    assert shapes == [(5, 5, 0), (14, 5, 3), (20, 5, 5)]
+
+
+def test_target_verification_widths_use_explicit_hotspot_buckets():
+    widths, valid_indices = _bucket_target_verification_widths(
+        [False, False, False, False, True],
+        gamma=4,
+        num_buckets=2,
+        configured_post_counts=((5, (0, 3, 5)),),
+    )
+
+    assert widths == [4, 4, 4, 4, 4]
+    assert valid_indices == [*range(16), 16]
+
+
+def test_target_graph_precompile_shapes_use_explicit_hotspot_buckets():
+    shapes = _target_graph_precompile_shapes(
+        [5],
+        gamma=4,
+        num_buckets=2,
+        configured_post_counts=((5, (0, 2, 5)),),
+    )
+
+    assert shapes == [(5, 5, 0), (11, 5, 2), (20, 5, 5)]
+
+
+def test_target_graph_post_counts_reject_invalid_ranges():
+    with pytest.raises(ValueError, match="strictly increasing"):
+        NativePearlConfig(
+            "draft",
+            "target",
+            1,
+            2,
+            4,
+            512,
+            32,
+            target_verification_graph_post_counts=((8, (0, 4, 7)),),
+        )
+
+
+def test_benchmark_parses_explicit_target_graph_post_counts():
+    assert _parse_target_graph_post_counts(
+        ["128:0,26,75,128", "64:0,47,64"]
+    ) == ((128, (0, 26, 75, 128)), (64, (0, 47, 64)))
+
+
+def test_target_follower_builds_replicated_greedy_result_without_broadcast():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.rank = 2
+    engine.gamma = 3
+    engine.device = torch.device("cpu")
+    engine.topology = PearlTopology(draft_ranks=(0,), target_ranks=(1, 2))
+    engine.groups = SimpleNamespace(correction_group=MagicMock())
+    verdict = torch.tensor([[2, -1], [0, 42]])
+    draft_message = torch.tensor([10, 11, 12, 20, 21, 22, 30, 31, 32])
+
+    with patch("vllm_ascend.spec_decode.pearl.native_engine.dist.broadcast") as broadcast:
+        accepted, corrections, next_windows = engine._broadcast_round_result(
+            verdict,
+            draft_message,
+            verification_size=3,
+            batch_size=2,
+            replicated_target_verdict=True,
+        )
+
+    broadcast.assert_not_called()
+    assert accepted == [2, 0]
+    assert corrections == [None, 42]
+    assert next_windows == [[20, 21, 22], [30, 31, 32]]
+
+
+def test_static_padding_restores_completed_rows_without_growing_their_state():
+    completed = PearlPipelineState(
+        [10, 20, 21],
+        prompt_length=1,
+        max_tokens=2,
+        ignore_eos=True,
+    )
+    active = PearlPipelineState(
+        [10, 30],
+        prompt_length=1,
+        max_tokens=3,
+        ignore_eos=True,
+    )
+    states = [completed, active]
+    snapshots: dict[int, PearlPipelineState] = {}
+
+    _restore_completed_states(states, snapshots, frozenset())
+    assert snapshots[0].token_ids == [10, 20, 21]
+
+    states[0].token_ids.extend([22, 23, 24, 25])
+    states[0].committed_length = len(states[0].token_ids)
+    _restore_completed_states(states, snapshots, frozenset())
+
+    assert states[0].token_ids == [10, 20, 21]
+    assert states[0] is not snapshots[0]
+    assert states[1] is active
+
+
+def test_continuous_tail_uses_only_full_and_half_batch_graph_buckets():
+    completed = {index: PearlPipelineState([index], prompt_length=1) for index in range(64)}
+
+    assert len(_continuous_bucket_indices(list(range(40)), completed, 64)) == 64
+    assert len(_continuous_bucket_indices(list(range(20)), completed, 64)) == 32
+    assert _continuous_bucket_indices([], completed, 64) == []
+
+
+def test_preemptive_continuous_scheduling_explores_least_served_requests():
+    states = [PearlPipelineState([index], prompt_length=1) for index in range(6)]
+    for state, rounds in zip(states, [2, 0, 1, 0, 3, 1]):
+        state.verification_rounds = rounds
+
+    assert _select_preemptive_continuous_indices(states, [0, 1, 2, 3, 4, 5], 4) == [1, 3, 2, 5]
+
+
+def test_preemptive_continuous_scheduling_prioritizes_estimated_remaining_work():
+    slow = PearlPipelineState([0, *range(17)], prompt_length=1, max_tokens=100)
+    fast = PearlPipelineState([0, *range(33)], prompt_length=1, max_tokens=100)
+    slow.verification_rounds = fast.verification_rounds = 8
+
+    assert _select_preemptive_continuous_indices([slow, fast], [0, 1], 1) == [0]
+
+
+def test_preemptive_continuous_scheduling_uses_recent_slowdown():
+    first = PearlPipelineState([0, *range(33)], prompt_length=1, max_tokens=100)
+    second = PearlPipelineState([0, *range(25)], prompt_length=1, max_tokens=100)
+    first.verification_rounds = second.verification_rounds = 8
+
+    selected = _select_preemptive_continuous_indices(
+        [first, second],
+        [0, 1],
+        1,
+        recent_token_gains=[[1, 1, 1, 1], [3, 3, 3, 3]],
+    )
+
+    assert selected == [0]
+
+
+def test_spec_rhythm_preemptive_scheduling_prioritizes_tpot_debt():
+    relaxed = PearlPipelineState(
+        [0, *range(8)], prompt_length=1, max_tokens=32, slo_tpot_ms=100.0
+    )
+    urgent = PearlPipelineState(
+        [0, *range(8)], prompt_length=1, max_tokens=32, slo_tpot_ms=10.0
+    )
+    relaxed.verification_rounds = urgent.verification_rounds = 8
+
+    selected = _select_preemptive_continuous_indices(
+        [relaxed, urgent],
+        [0, 1],
+        1,
+        decode_elapsed_ms=500.0,
+        slo_aware=True,
+    )
+
+    assert selected == [1]
+
+
+def test_sampling_params_validate_optional_tpot_slo():
+    params = SamplingParams(temperature=0.0, max_tokens=4, slo_tpot_ms=25.0, slo_class="tight")
+    assert params.slo_tpot_ms == 25.0
+    assert params.slo_class == "tight"
+    with pytest.raises(ValueError, match="TPOT SLO"):
+        SamplingParams(slo_tpot_ms=0.0)
 
 
 def test_preverify_acceptance_keeps_draft_and_target_states_in_sync():
@@ -63,6 +315,7 @@ def test_preverify_acceptance_keeps_draft_and_target_states_in_sync():
     assert not draft.pre_verify
     assert draft.accepted_draft_tokens == 1
     assert draft.verified_draft_tokens == 1
+    assert draft.verification_rounds == target.verification_rounds == 1
 
 
 def test_postverify_rejection_rolls_back_the_same_pipeline_suffix_on_both_sides():
@@ -94,6 +347,116 @@ def test_postverify_rejection_rolls_back_the_same_pipeline_suffix_on_both_sides(
     assert draft.pre_verify
     assert draft.accepted_draft_tokens == 2
     assert draft.verified_draft_tokens == 4
+    assert draft.verification_rounds == target.verification_rounds == 1
+
+
+def test_variable_gamma_transition_tracks_current_and_next_window_sizes():
+    target = PearlPipelineState([1, 2, 3], prompt_length=2)
+    draft = target.clone()
+    first_window = [4, 5]
+    draft.token_ids.extend(first_window)
+    for state, apply in (
+        (draft, draft.apply_draft_verification),
+        (target, target.apply_target_verification),
+    ):
+        apply(
+            gamma=5,
+            accepted=1,
+            correction_token_id=None,
+            next_round_token_ids=first_window,
+            verification_size=1,
+        )
+        assert state.pending_window_size == 2
+
+    second_window = [6, 7, 8, 9, 10]
+    draft.token_ids.extend(second_window)
+    draft.apply_draft_verification(
+        gamma=5,
+        accepted=1,
+        correction_token_id=42,
+        next_round_token_ids=second_window,
+        verification_size=2,
+    )
+    target.apply_target_verification(
+        gamma=5,
+        accepted=1,
+        correction_token_id=42,
+        next_round_token_ids=second_window,
+        verification_size=2,
+    )
+
+    assert draft.token_ids == target.token_ids == [1, 2, 3, 4, 5, 42]
+    assert draft.committed_length == target.committed_length == 6
+    assert draft.pending_window_size == target.pending_window_size == 0
+    assert draft.continuation_epoch == target.continuation_epoch == 2
+
+
+def test_rolling_eager_suffix_is_guarded_until_parent_verification():
+    draft = PearlPipelineState(
+        [1, 2, 3, 4, 5],
+        prompt_length=2,
+        pre_verify=False,
+        committed_length=4,
+        pending_window_size=2,
+    )
+    target = draft.clone()
+    next_window = [6, 7, 8]
+    eager_window = [9, 10]
+    draft.token_ids.extend(next_window)
+    draft.token_ids.extend(eager_window)
+
+    # A rejection invalidates the eager continuation before the ordinary
+    # PEARL rollback consumes the current next-window suffix.
+    del draft.token_ids[-len(eager_window) :]
+    draft.apply_draft_verification(
+        gamma=4,
+        accepted=1,
+        correction_token_id=42,
+        next_round_token_ids=next_window,
+        verification_size=2,
+    )
+    target.apply_target_verification(
+        gamma=4,
+        accepted=1,
+        correction_token_id=42,
+        next_round_token_ids=next_window,
+        verification_size=2,
+    )
+    assert draft.token_ids == target.token_ids
+    assert draft.committed_length == target.committed_length
+
+
+def test_device_mailbox_validates_prefix_epoch_and_variable_shapes():
+    state = PearlPipelineState([1, 2], prompt_length=1)
+    ticket = SpecRhythmProposalTicket(
+        proposal_id=3,
+        request_index=0,
+        home_batch_id=0,
+        gamma=2,
+        required_prefix_epoch=0,
+    )
+    payload = NativeSpecRhythmDevicePayload(
+        ticket=ticket,
+        verification_tokens=torch.tensor([4]),
+        next_tokens=torch.tensor([4, 5]),
+        verification_size=1,
+        draft_confidence=0.8,
+    )
+    payload.validate_for(state)
+    state.continuation_epoch = 1
+    with pytest.raises(RuntimeError, match="stale device mailbox"):
+        payload.validate_for(state)
+
+    bad_width = NativeSpecRhythmDevicePayload(
+        ticket=ticket,
+        verification_tokens=torch.tensor([4, 5, 6]),
+        next_tokens=torch.tensor([4, 5]),
+        verification_size=3,
+        draft_confidence=0.8,
+    )
+    state.continuation_epoch = 0
+    with pytest.raises(RuntimeError, match="does not match"):
+        bad_width.validate_for(state)
 
 
 def test_native_qwen2_model_runs_with_a_single_tensor_parallel_rank_on_cpu():
@@ -119,10 +482,16 @@ def test_native_qwen2_model_runs_with_a_single_tensor_parallel_rank_on_cpu():
     hidden_states = model(torch.tensor([1, 2, 3]), torch.tensor([0, 1, 2]))
     logits = model.compute_logits(hidden_states)
     greedy_tokens = model.compute_greedy_tokens(hidden_states, vocabulary_size=31)
+    confidence_tokens, confidences = model.compute_greedy_tokens_with_confidence(
+        hidden_states, vocabulary_size=31
+    )
 
     assert hidden_states.shape == (3, 16)
     assert logits.shape == (3, 32)
     assert torch.equal(greedy_tokens, logits[:, :31].argmax(dim=-1))
+    assert torch.equal(confidence_tokens, greedy_tokens)
+    expected_confidences = torch.softmax(logits[:, :31].float(), dim=-1).max(dim=-1).values
+    assert torch.allclose(confidences, expected_confidences)
 
 
 @pytest.mark.parametrize("architecture", ["Qwen2ForCausalLM", "Qwen3ForCausalLM", "LlamaForCausalLM"])
@@ -158,6 +527,28 @@ def test_native_model_runs_every_upstream_architecture_on_cpu(architecture):
     assert isinstance(attention.q_norm, NativeRMSNorm) == (architecture == "Qwen3ForCausalLM")
     assert (attention.o_proj.bias is not None) == (architecture == "LlamaForCausalLM")
     assert (model.layers[0].mlp.gate_up_proj.bias is not None) == (architecture == "LlamaForCausalLM")
+
+
+def test_native_qwen3_attention_admits_production_qknorm_rope_fusion():
+    config = SimpleNamespace(
+        architectures=["Qwen3ForCausalLM"],
+        hidden_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=128,
+        max_position_embeddings=32,
+        rope_theta=10_000.0,
+        rope_parameters={"rope_theta": 10_000.0, "rope_type": "default"},
+        rms_norm_eps=1e-6,
+    )
+
+    attention = NativeAttention(
+        config,
+        NativeTPContext(group=None, rank=0, size=1, leader_rank=0),
+    )
+
+    assert attention.use_qknorm_rope_fusion == hasattr(torch.ops.vllm, "qkv_rmsnorm_rope")
+    assert attention.rotary_emb.cos_sin_cache.shape == (32, 128)
 
 
 def test_dynamic_tp_config_matches_upstream_padding_rules():
@@ -303,7 +694,15 @@ def test_native_model_builds_disjoint_paged_metadata_for_a_static_batch():
     assert metadata.block_tables.tolist() == [[0, 1], [2, 3], [2, 3]]
     assert metadata.actual_seq_lengths_q == (1, 3)
     assert metadata.sequence_lens == (129, 129)
-    assert metadata.request_block_tables.tolist() == [[0, 1], [2, 3]]
+    assert metadata.request_block_tables is None
+
+    _, fia_metadata = model.make_attention_metadata(
+        [0, 1, 1],
+        [128, 0, 128],
+        use_fused_infer_attention=True,
+    )
+    assert fia_metadata.request_block_tables.tolist() == [[0, 1], [2, 3]]
+    assert fia_metadata.block_tables is fia_metadata.request_block_tables
 
     _, remapped = model.make_attention_metadata(
         [0, 1],
@@ -320,6 +719,73 @@ def test_native_model_builds_disjoint_paged_metadata_for_a_static_batch():
         slot_mapping=[777, 888],
     )
     assert direct_slots.slot_mapping.tolist() == [777, 888]
+
+
+def test_fia_graph_input_copy_skips_unused_token_block_tables():
+    entry = SimpleNamespace(
+        input_ids=torch.empty(2, dtype=torch.long),
+        positions=torch.empty(2, dtype=torch.long),
+        slot_mapping=torch.empty(2, dtype=torch.long),
+        context_lens=MagicMock(),
+        block_tables=MagicMock(),
+        request_block_tables=torch.empty((2, 2), dtype=torch.int32),
+        actual_seq_lengths_q=(),
+        sequence_lens=(),
+    )
+    metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([1, 2]),
+        context_lens=torch.tensor([4, 5]),
+        block_tables=torch.tensor([[0, 1], [2, 3]]),
+        request_block_tables=torch.tensor([[4, 5], [6, 7]], dtype=torch.int32),
+        actual_seq_lengths_q=(1, 2),
+        sequence_lens=(4, 5),
+    )
+
+    NativeACLGraphRunner._copy_inputs(
+        entry,
+        torch.tensor([10, 11]),
+        torch.tensor([3, 4]),
+        metadata,
+    )
+
+    entry.context_lens.copy_.assert_not_called()
+    entry.block_tables.copy_.assert_not_called()
+    assert torch.equal(entry.request_block_tables, metadata.request_block_tables)
+    assert entry.actual_seq_lengths_q == (1, 2)
+    assert entry.sequence_lens == (4, 5)
+
+
+def test_paged_draft_graph_input_copy_updates_context_and_token_block_tables():
+    entry = SimpleNamespace(
+        input_ids=torch.empty(2, dtype=torch.long),
+        positions=(torch.empty(2, dtype=torch.long),),
+        slot_mappings=(torch.empty(2, dtype=torch.long),),
+        context_lens=(torch.empty(2, dtype=torch.int32),),
+        block_tables=(torch.empty((2, 2), dtype=torch.int32),),
+        request_block_tables=(None,),
+        actual_seq_lengths_q=(),
+        sequence_lens=(),
+    )
+    metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([1, 2]),
+        context_lens=torch.tensor([4, 5], dtype=torch.int32),
+        block_tables=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+        request_block_tables=torch.tensor([[4, 5], [6, 7]], dtype=torch.int32),
+        actual_seq_lengths_q=(1, 2),
+        sequence_lens=(4, 5),
+    )
+
+    NativeACLGraphRunner._copy_draft_inputs(
+        entry,
+        torch.tensor([10, 11]),
+        [torch.tensor([3, 4])],
+        [metadata],
+    )
+
+    assert torch.equal(entry.context_lens[0], metadata.context_lens)
+    assert torch.equal(entry.block_tables[0], metadata.block_tables)
+    assert entry.actual_seq_lengths_q == ((1, 2),)
+    assert entry.sequence_lens == ((4, 5),)
 
 
 def test_native_prefix_cache_shares_full_prompt_blocks_within_and_across_batches():
@@ -372,6 +838,34 @@ def test_target_ar_draft_rank_returns_without_allocating_or_running_the_model():
     engine._allocate_cache.assert_not_called()
 
 
+def test_target_ar_prefill_preserves_global_sequence_ids_across_chunks():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.cache_allocation = SimpleNamespace(num_cached_tokens=[0, 4, 8])
+    engine.topology = SimpleNamespace(target_leader_rank=1)
+    engine.groups = SimpleNamespace(target_group=object())
+    engine._run_packed_sample = MagicMock(return_value=torch.tensor([31, 41]))
+    states = [
+        PearlPipelineState([1], prompt_length=1, temperature=0),
+        PearlPipelineState([2], prompt_length=1, temperature=0),
+    ]
+
+    result = engine._target_ar_prefill(
+        [[10, 11, 12, 13, 14, 15], [20, 21, 22, 23, 24, 25, 26, 27, 28, 29]],
+        states,
+        sequence_ids=[1, 2],
+    )
+
+    assert result == [31, 41]
+    engine._run_packed_sample.assert_called_once_with(
+        [14, 15, 28, 29],
+        [1, 1, 2, 2],
+        [4, 5, 8, 9],
+        [0, 0],
+        use_aclgraph=False,
+        logit_indices=[1, 3],
+    )
+
+
 def test_native_engine_builds_slots_from_the_cpu_cache_page_table():
     engine = NativePearlEngine.__new__(NativePearlEngine)
     engine.config = SimpleNamespace(kvcache_block_size=128)
@@ -388,7 +882,11 @@ def test_target_postverify_uses_speculative_fia_aclgraph(temperature):
     engine.is_draft = False
     engine.gamma = 4
     engine.draft_vocab_size = 32
-    engine.config = SimpleNamespace(enforce_eager=False)
+    engine.config = SimpleNamespace(
+        enforce_eager=False,
+        target_verification_graph_buckets=32,
+        target_use_paged_attention=False,
+    )
     state = PearlPipelineState(
         [1, 2, 3, 4, 5, 6],
         prompt_length=2,
@@ -410,7 +908,11 @@ def test_target_preverify_uses_speculative_fia_aclgraph():
     engine.is_draft = False
     engine.gamma = 4
     engine.draft_vocab_size = 32
-    engine.config = SimpleNamespace(enforce_eager=False)
+    engine.config = SimpleNamespace(
+        enforce_eager=False,
+        target_verification_graph_buckets=32,
+        target_use_paged_attention=False,
+    )
     state = PearlPipelineState([1, 2, 3], prompt_length=2, pre_verify=True)
     engine._run_packed_greedy = MagicMock(return_value=torch.tensor([4]))
 
@@ -418,6 +920,25 @@ def test_target_preverify_uses_speculative_fia_aclgraph():
 
     assert engine._run_packed_greedy.call_args.kwargs["use_aclgraph"] is True
     assert engine._run_packed_greedy.call_args.kwargs["use_fused_infer_attention"] is True
+
+
+def test_target_verification_can_select_paged_attention_aclgraph():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.is_draft = False
+    engine.gamma = 4
+    engine.draft_vocab_size = 32
+    engine.config = SimpleNamespace(
+        enforce_eager=False,
+        target_verification_graph_buckets=32,
+        target_use_paged_attention=True,
+    )
+    state = PearlPipelineState([1, 2, 3], prompt_length=2, pre_verify=True)
+    engine._run_packed_greedy = MagicMock(return_value=torch.tensor([4]))
+
+    engine._target_round_outputs_batch([state], [0])
+
+    assert engine._run_packed_greedy.call_args.kwargs["use_aclgraph"] is True
+    assert engine._run_packed_greedy.call_args.kwargs["use_fused_infer_attention"] is False
 
 
 def test_greedy_graph_forwards_the_speculative_fia_backend():
@@ -460,6 +981,124 @@ def test_draft_round_uses_speculative_fia_aclgraph():
     )
 
 
+def test_draft_round_uses_one_gamma_step_aclgraph_when_available():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.is_draft = True
+    engine.gamma = 2
+    engine.draft_vocab_size = 32
+    engine.device = torch.device("cpu")
+    engine.config = SimpleNamespace(enforce_eager=False)
+    engine.graph_runner = MagicMock()
+    engine.graph_runner.run_draft_greedy.return_value = torch.tensor([[4, 5]])
+    metadata = SimpleNamespace(use_fused_infer_attention=True)
+    engine._prepare_attention_metadata = MagicMock(
+        side_effect=[
+            (torch.tensor([2]), metadata),
+            (torch.tensor([3]), metadata),
+        ]
+    )
+    state = PearlPipelineState([1, 2, 3], prompt_length=2)
+
+    verification, continuation = engine._draft_round_batch([state], [0])
+
+    assert verification == [[4]]
+    assert continuation == [[4, 5]]
+    assert engine._prepare_attention_metadata.call_args_list[0].args == ([0], [2])
+    assert engine._prepare_attention_metadata.call_args_list[1].args == ([0], [3])
+    engine.graph_runner.run_draft_greedy.assert_called_once()
+
+
+def test_draft_round_can_select_paged_attention_aclgraph():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.is_draft = True
+    engine.gamma = 2
+    engine.draft_vocab_size = 32
+    engine.device = torch.device("cpu")
+    engine.config = SimpleNamespace(enforce_eager=False, draft_use_paged_attention=True)
+    engine.graph_runner = MagicMock()
+    engine.graph_runner.run_draft_greedy.return_value = torch.tensor([[4, 5]])
+    metadata = SimpleNamespace(use_fused_infer_attention=False)
+    engine._prepare_attention_metadata = MagicMock(
+        side_effect=[
+            (torch.tensor([2]), metadata),
+            (torch.tensor([3]), metadata),
+        ]
+    )
+    state = PearlPipelineState([1, 2, 3], prompt_length=2)
+
+    verification, continuation = engine._draft_round_batch([state], [0])
+
+    assert verification == [[4]]
+    assert continuation == [[4, 5]]
+    assert all(
+        call.kwargs["use_fused_infer_attention"] is False for call in engine._prepare_attention_metadata.call_args_list
+    )
+    engine.graph_runner.run_draft_greedy.assert_called_once()
+
+
+def test_draft_aclgraph_captures_paged_attention_steps():
+    model = MagicMock()
+    runner = NativeACLGraphRunner(model, enabled=False)
+    runner.enabled = True
+    runner.expected_fia_batch_size = 2
+    runner._capture_draft = MagicMock(return_value=torch.tensor([[4, 5], [6, 7]]))
+    metadata = SimpleNamespace(use_fused_infer_attention=False)
+
+    output = runner.run_draft_greedy(
+        torch.tensor([2, 3]),
+        [torch.tensor([1, 1]), torch.tensor([2, 2])],
+        [metadata, metadata],
+        vocabulary_size=32,
+    )
+
+    assert output.tolist() == [[4, 5], [6, 7]]
+    assert runner._capture_draft.call_args.args[0] == (
+        "draft-greedy:32|steps:2|paged",
+        2,
+    )
+
+
+def test_draft_aclgraph_eager_chain_feeds_each_token_to_the_next_step():
+    model = MagicMock()
+    model.side_effect = [torch.tensor([[10.0]]), torch.tensor([[20.0]])]
+    model.compute_greedy_tokens.side_effect = [torch.tensor([4]), torch.tensor([5])]
+    runner = NativeACLGraphRunner(model, enabled=False)
+
+    output = runner.run_draft_greedy(
+        torch.tensor([3]),
+        [torch.tensor([2]), torch.tensor([3])],
+        [
+            SimpleNamespace(use_fused_infer_attention=True),
+            SimpleNamespace(use_fused_infer_attention=True),
+        ],
+        vocabulary_size=32,
+    )
+
+    assert output.tolist() == [[4, 5]]
+    assert torch.equal(model.call_args_list[0].args[0], torch.tensor([3]))
+    assert torch.equal(model.call_args_list[1].args[0], torch.tensor([4]))
+
+
+def test_draft_aclgraph_uses_eager_for_a_dynamic_tail_batch():
+    model = MagicMock()
+    runner = NativeACLGraphRunner(model, enabled=False)
+    runner.enabled = True
+    runner.expected_fia_batch_size = 4
+    runner._execute_draft = MagicMock(return_value=torch.tensor([[4, 5], [6, 7]]))
+    metadata = SimpleNamespace(use_fused_infer_attention=True)
+
+    output = runner.run_draft_greedy(
+        torch.tensor([2, 3]),
+        [torch.tensor([1, 1]), torch.tensor([2, 2])],
+        [metadata, metadata],
+        vocabulary_size=32,
+    )
+
+    assert output.tolist() == [[4, 5], [6, 7]]
+    assert runner.shape_fallback_count == 1
+    runner._execute_draft.assert_called_once()
+
+
 def test_draft_round_snapshots_a_reused_aclgraph_output_buffer():
     engine = NativePearlEngine.__new__(NativePearlEngine)
     engine.is_draft = True
@@ -478,6 +1117,81 @@ def test_draft_round_snapshots_a_reused_aclgraph_output_buffer():
     _, continuation = engine._draft_round_batch([state], [0])
 
     assert continuation == [[1, 2]]
+
+
+def test_draft_round_executes_only_rows_with_remaining_variable_budget():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.is_draft = True
+    engine.gamma = 4
+    engine.device = torch.device("cpu")
+    engine.config = SimpleNamespace(enforce_eager=True, draft_use_paged_attention=False)
+    engine._run_device_packed_greedy = MagicMock(
+        side_effect=[
+            torch.tensor([10, 20]),
+            torch.tensor([11]),
+            torch.tensor([12]),
+        ]
+    )
+    states = [
+        PearlPipelineState([1, 2], prompt_length=1),
+        PearlPipelineState([3, 4], prompt_length=1),
+    ]
+
+    verification, continuation = engine._draft_round_device_batch(
+        states, [0, 1], draft_budgets=[3, 1]
+    )
+
+    assert verification.tolist() == [10, 20]
+    assert continuation.tolist() == [[10, 11, 12, -1], [20, -1, -1, -1]]
+    assert [call.args[1] for call in engine._run_device_packed_greedy.call_args_list] == [
+        [0, 1],
+        [0],
+        [0],
+    ]
+
+
+def test_spec_rhythm_eager_verification_keeps_the_parent_window_prefix():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.is_draft = True
+    engine.gamma = 4
+    engine.device = torch.device("cpu")
+    engine.config = SimpleNamespace(
+        enforce_eager=True,
+        draft_use_paged_attention=False,
+    )
+    engine._run_device_packed_greedy_with_confidence = MagicMock(
+        side_effect=[
+            (torch.tensor([10, 20]), torch.tensor([0.8, 0.7])),
+            (torch.tensor([11, 21]), torch.tensor([0.6, 0.5])),
+        ]
+    )
+    states = [
+        PearlPipelineState([1, 2], prompt_length=1),
+        PearlPipelineState([3, 4, 30, 31, 32, 33], prompt_length=1),
+    ]
+
+    verification, continuation, confidence = (
+        engine._draft_spec_rhythm_device_batch(
+            states,
+            [0, 1],
+            [2, 2],
+            verification_sizes=[1, 4],
+            verification_prefixes=[None, torch.tensor([31, 32, 33])],
+        )
+    )
+
+    assert verification.tolist() == [10, 31, 32, 33, 20]
+    assert continuation.tolist() == [[10, 11, -1, -1], [20, 21, -1, -1]]
+    assert confidence.tolist() == pytest.approx([0.7, 0.6])
+
+
+def test_greedy_verdict_supports_mixed_per_request_gamma():
+    target = torch.tensor([1, 2, 9, 4, 5, 6])
+    draft = torch.tensor([1, 2, 3, 4, 0, 0])
+    verdict = _build_greedy_verdict(
+        target, draft, verification_sizes=[3, 1, 2], gamma=5
+    )
+    assert verdict.tolist() == [[2, 9], [1, -1], [0, 5]]
 
 
 def test_completion_is_truncated_at_the_first_eos_or_token_limit():
@@ -588,6 +1302,64 @@ def test_direct_worker_cli_exposes_cache_capacity_controls():
     assert args.gpu_memory_utilization == 0.98
     assert args.num_kvcache_blocks == 32
     assert args.max_aclgraph_entries == 8
+    assert args.target_verification_graph_buckets == 8
+    assert args.disable_cpu_binding is False
+    assert args.draft_use_production_rope is True
+    assert args.target_use_production_rope is True
+    assert args.spec_rhythm_min_gamma == 1
+    assert args.spec_rhythm_max_eager_tokens == 0
+
+
+def test_benchmark_cli_defaults_production_rope_with_independent_fallbacks():
+    required = [
+        "--draft-model",
+        "draft",
+        "--target-model",
+        "target",
+        "--prompt",
+        "hello",
+    ]
+    defaults = _build_benchmark_parser().parse_args(required)
+    fallback = _build_benchmark_parser().parse_args(
+        [
+            *required,
+            "--no-draft-use-production-rope",
+            "--no-target-use-production-rope",
+        ]
+    )
+
+    assert defaults.draft_use_production_rope is True
+    assert defaults.target_use_production_rope is True
+    assert fallback.draft_use_production_rope is False
+    assert fallback.target_use_production_rope is False
+
+
+def test_benchmark_clis_accept_disjoint_warmup_prompt_offsets():
+    speculative = _build_benchmark_parser().parse_args(
+        [
+            "--draft-model",
+            "draft",
+            "--target-model",
+            "target",
+            "--prompt",
+            "hello",
+            "--warmup-prompt-offset",
+            "200",
+        ]
+    )
+    target_only = _build_target_only_benchmark_parser().parse_args(
+        [
+            "--model",
+            "target",
+            "--prompt",
+            "hello",
+            "--warmup-prompt-offset",
+            "200",
+        ]
+    )
+
+    assert speculative.warmup_prompt_offset == 200
+    assert target_only.warmup_prompt_offset == 200
 
 
 def test_public_pearl_config_maps_upstream_fields_to_native_runtime():
@@ -607,7 +1379,27 @@ def test_public_pearl_config_maps_upstream_fields_to_native_runtime():
             max_model_len=512,
             max_num_batched_tokens=1024,
             max_num_seqs=8,
+            draft_dtype="bfloat16",
+            target_dtype="float16",
+            prefill_chunk_size=4,
+            max_num_queued_seqs=12,
             gamma=4,
+            enable_continuous_batching=True,
+            enable_preemptive_scheduling=True,
+            enable_spec_rhythm=True,
+            spec_rhythm_min_gamma=2,
+            spec_rhythm_max_eager_tokens=3,
+            spec_rhythm_roofline={"8:1": 24},
+            spec_rhythm_draft_token_budget=32,
+            pad_finished_requests=True,
+            draft_use_paged_attention=True,
+            target_use_paged_attention=True,
+            draft_use_production_rope=True,
+            target_use_production_rope=True,
+            precompile_decode_graphs=True,
+            target_verification_graph_post_counts=((8, (0, 4, 8)),),
+            enable_cpu_binding=False,
+            profile_decode_steps=5,
         )
 
     native = config.to_native()
@@ -620,14 +1412,102 @@ def test_public_pearl_config_maps_upstream_fields_to_native_runtime():
     assert config.target_config.master_rank == 1
     assert native.draft_model == "draft"
     assert native.target_tp_size == 2
+    assert native.draft_dtype == "bfloat16"
+    assert native.target_dtype == "float16"
     assert native.max_num_batched_tokens == 1024
-    assert native.max_aclgraph_entries == 16
+    assert native.max_aclgraph_entries == 32
+    assert native.target_verification_graph_buckets == 8
+    assert native.target_verification_graph_post_counts == ((8, (0, 4, 8)),)
     assert native.max_num_seqs == 8
+    assert native.prefill_chunk_size == 4
+    assert native.max_num_queued_seqs == 12
+    assert native.enable_continuous_batching is True
+    assert native.enable_preemptive_scheduling is True
+    assert native.enable_spec_rhythm is True
+    assert native.spec_rhythm_min_gamma == 2
+    assert native.spec_rhythm_max_eager_tokens == 3
+    assert native.spec_rhythm_roofline == {"8:1": 24}
+    assert native.spec_rhythm_draft_token_budget == 32
+    assert native.pad_finished_requests is True
+    assert native.draft_use_paged_attention is True
+    assert native.target_use_paged_attention is True
+    assert native.draft_use_production_rope is True
+    assert native.target_use_production_rope is True
+    assert native.precompile_decode_graphs is True
+    assert native.enable_cpu_binding is False
+    assert native.profile_decode_steps == 5
 
 
 def test_public_pearl_config_rejects_nonpositive_worker_timeout():
     with pytest.raises(ValueError, match="worker_timeout_seconds"):
         PEARLConfig("draft", "target", worker_timeout_seconds=0)
+
+
+def test_native_pearl_config_rejects_unsupported_dtype():
+    with pytest.raises(ValueError, match="model dtype"):
+        NativePearlConfig("draft", "target", 1, 2, 4, 512, 32, target_dtype="float32")
+
+
+def test_public_pearl_config_requires_continuous_batching_for_preemption():
+    with pytest.raises(ValueError, match="preemptive scheduling"):
+        PEARLConfig("draft", "target", enable_preemptive_scheduling=True)
+
+
+def test_public_pearl_config_rejects_negative_profile_decode_steps():
+    with pytest.raises(ValueError, match="profile_decode_steps"):
+        PEARLConfig("draft", "target", profile_decode_steps=-1)
+
+
+def test_public_pearl_config_requires_steps_for_profiling_only():
+    with pytest.raises(ValueError, match="profiling-only"):
+        PEARLConfig("draft", "target", stop_after_profiled_decode_steps=True)
+
+
+def test_native_graph_precompilation_requires_fixed_paged_configuration():
+    common = {
+        "draft_model": "draft",
+        "target_model": "target",
+        "draft_tp_size": 1,
+        "target_tp_size": 1,
+        "max_model_len": 32,
+        "max_tokens": 8,
+        "precompile_decode_graphs": True,
+    }
+
+    with pytest.raises(ValueError, match="fixed gamma"):
+        NativePearlConfig(**common, gamma=-1)
+    with pytest.raises(ValueError, match="paged attention"):
+        NativePearlConfig(**common, gamma=4)
+    with pytest.raises(ValueError, match="max_aclgraph_entries"):
+        NativePearlConfig(
+            **common,
+            gamma=4,
+            max_num_seqs=8,
+            enable_continuous_batching=True,
+            draft_use_paged_attention=True,
+            target_use_paged_attention=True,
+            max_aclgraph_entries=8,
+        )
+def test_profiling_only_continuous_results_can_include_unfinished_requests():
+    completed = PearlPipelineState([1, 2], prompt_length=1)
+    unfinished = PearlPipelineState([3, 4], prompt_length=1)
+    completed_request_states = {0: completed}
+    local_states = [PearlPipelineState([9], prompt_length=1), unfinished]
+
+    result_states = _continuous_result_states(local_states, completed_request_states)
+
+    assert result_states == [completed, unfinished]
+
+
+@pytest.mark.parametrize("prefill_chunk_size", [0, 9])
+def test_public_pearl_config_rejects_invalid_prefill_chunk_size(prefill_chunk_size):
+    with pytest.raises(ValueError, match="prefill_chunk_size"):
+        PEARLConfig(
+            "draft",
+            "target",
+            max_num_seqs=8,
+            prefill_chunk_size=prefill_chunk_size,
+        )
 
 
 def test_public_engine_collects_worker_replies_in_rank_order():
@@ -647,6 +1527,30 @@ def test_public_engine_collects_worker_replies_in_rank_order():
     finally:
         for connection in (rank0, rank1, worker0, worker1):
             connection.close()
+
+
+def test_public_engine_preserves_sampling_request_metadata_when_not_overridden():
+    engine = PEARLEngine.__new__(PEARLEngine)
+    engine.config = SimpleNamespace(max_model_len=64)
+    engine._requests = []
+    engine._next_request_id = 0
+    params = SamplingParams(
+        max_tokens=4,
+        request_id="trace-7",
+        arrival_ts=123.5,
+        slo_tpot_ms=20.0,
+        slo_class="tight",
+        spec_rhythm_max_gamma=3,
+    )
+
+    engine.add_request([1, 2], params)
+
+    queued = engine._requests[0][2]
+    assert queued.request_id == "trace-7"
+    assert queued.arrival_ts == 123.5
+    assert queued.slo_tpot_ms == 20.0
+    assert queued.slo_class == "tight"
+    assert queued.spec_rhythm_max_gamma == 3
 
 
 def test_public_engine_times_out_with_pending_worker_ranks():
@@ -674,6 +1578,36 @@ def test_public_engine_broadcasts_upstream_log_command():
 
     engine._send_all.assert_called_once_with(("log", "ready", None, None))
     engine._receive_all.assert_called_once_with("worker logging")
+
+
+def test_public_engine_configures_decode_profiling_on_every_worker():
+    engine = PEARLEngine.__new__(PEARLEngine)
+    engine._send_all = MagicMock()
+    engine._receive_all = MagicMock(return_value=[("configured", 0), ("configured", 1)])
+
+    engine.configure_decode_profiling(5, True)
+
+    engine._send_all.assert_called_once_with(("configure_decode_profiling", 5, True, None))
+    engine._receive_all.assert_called_once_with("worker profiling configuration")
+
+
+def test_native_engine_reconfigures_decode_profiling_without_model_reload():
+    engine = NativePearlEngine.__new__(NativePearlEngine)
+    engine.config = NativePearlConfig(
+        draft_model="draft",
+        target_model="target",
+        draft_tp_size=1,
+        target_tp_size=1,
+        gamma=4,
+        max_model_len=32,
+        max_tokens=8,
+        profile_decode_steps=0,
+    )
+
+    engine.configure_decode_profiling(5, True)
+
+    assert engine.config.profile_decode_steps == 5
+    assert engine.config.stop_after_profiled_decode_steps is True
 
 
 def test_public_engine_chunks_queued_requests_by_sequence_and_token_limits():
@@ -751,6 +1685,123 @@ def test_public_engine_aggregates_aclgraph_metrics_from_every_worker():
     assert engine.last_metrics[0]["aclgraph_failed_captures"] == 6
     assert engine.last_metrics[0]["aclgraph_capacity_fallbacks"] == 9
     assert engine.last_metrics[0]["aclgraph_shape_fallbacks"] == 11
+    assert engine.last_worker_metrics_by_chunk == [
+        {
+            "batch_size": 1,
+            "num_requests": 1,
+            "worker_metrics": [failed_rank_metrics, base_metrics],
+        }
+    ]
+
+
+def test_decode_profile_aggregates_only_full_batch_chunks_per_step():
+    def worker(rank, is_draft, scale):
+        return {
+            "rank": rank,
+            "is_draft_rank": int(is_draft),
+            "worker_profiled_decode_steps": 2,
+            "worker_profile_draft_compute_seconds": 0.01 * scale,
+            "worker_profile_draft_to_target_communication_seconds": 0.02 * scale,
+            "worker_profile_target_compute_seconds": 0.03 * scale,
+            "worker_profile_target_verdict_seconds": 0.04 * scale,
+            "worker_profile_target_to_draft_communication_seconds": 0.05 * scale,
+            "worker_profile_wait_sync_seconds": 0.06 * scale,
+            "worker_profile_state_update_seconds": 0.07 * scale,
+        }
+
+    chunks = [
+        {
+            "batch_size": 8,
+            "worker_metrics": [worker(0, True, 1), worker(1, False, 2), worker(2, False, 3)],
+        },
+        {
+            "batch_size": 3,
+            "worker_metrics": [worker(0, True, 100), worker(1, False, 100)],
+        },
+    ]
+
+    profile = _aggregate_decode_profile(chunks, batch_size=8)
+
+    assert profile["profiled_full_batch_chunks"] == 1
+    assert profile["profiled_decode_steps"] == 2
+    assert profile["phase_milliseconds_per_decode_step"] == pytest.approx(
+        {
+            "draft_compute": 5.0,
+            "draft_to_target_communication": 30.0,
+            "target_verify": 105.0,
+            "target_to_draft_communication": 75.0,
+            "wait_sync_state_update": 195.0,
+        }
+    )
+
+
+def test_worker_aclgraph_deltas_match_workers_by_rank():
+    before = [
+        {
+            "rank": 1,
+            "aclgraph_captures": 2,
+            "aclgraph_capture_attempts": 2,
+            "aclgraph_replays": 4,
+            "aclgraph_failed_captures": 0,
+            "aclgraph_capacity_fallbacks": 0,
+            "aclgraph_shape_fallbacks": 0,
+        },
+        {
+            "rank": 0,
+            "aclgraph_captures": 1,
+            "aclgraph_capture_attempts": 1,
+            "aclgraph_replays": 3,
+            "aclgraph_failed_captures": 0,
+            "aclgraph_capacity_fallbacks": 0,
+            "aclgraph_shape_fallbacks": 0,
+        },
+    ]
+    after = [
+        {**before[1], "aclgraph_replays": 8},
+        {
+            **before[0],
+            "aclgraph_captures": 3,
+            "aclgraph_capture_attempts": 3,
+            "aclgraph_replays": 9,
+        },
+    ]
+
+    deltas = _worker_aclgraph_deltas(before, after)
+
+    assert deltas[0]["rank"] == 0
+    assert deltas[0]["aclgraph_capture_attempts_delta"] == 0
+    assert deltas[0]["aclgraph_replays_delta"] == 5
+    assert deltas[1]["rank"] == 1
+    assert deltas[1]["aclgraph_capture_attempts_delta"] == 1
+    assert deltas[1]["aclgraph_replays_delta"] == 5
+
+
+def test_worker_aclgraph_deltas_count_cold_measurement_without_warmup():
+    after = [
+        {
+            "rank": 0,
+            "aclgraph_captures": 2,
+            "aclgraph_capture_attempts": 2,
+            "aclgraph_replays": 7,
+            "aclgraph_failed_captures": 0,
+            "aclgraph_capacity_fallbacks": 0,
+            "aclgraph_shape_fallbacks": 0,
+        }
+    ]
+
+    deltas = _worker_aclgraph_deltas([], after)
+
+    assert deltas == [
+        {
+            "rank": 0,
+            "aclgraph_captures_delta": 2,
+            "aclgraph_capture_attempts_delta": 2,
+            "aclgraph_replays_delta": 7,
+            "aclgraph_failed_captures_delta": 0,
+            "aclgraph_capacity_fallbacks_delta": 0,
+            "aclgraph_shape_fallbacks_delta": 0,
+        }
+    ]
 
 
 def test_greedy_verdict_finds_first_mismatch_in_packed_mixed_windows():
@@ -761,6 +1812,27 @@ def test_greedy_verdict_finds_first_mismatch_in_packed_mixed_windows():
         target_tokens,
         draft_tokens,
         verification_sizes=[1, 4, 4],
+        gamma=4,
+    )
+
+    assert verdict.tolist() == [[1, -1], [1, 21], [0, 51]]
+
+
+def test_layout_greedy_verdict_matches_general_packed_windows():
+    target_tokens = torch.tensor([5, 10, 21, 32, 40, 51, 61, 71, 81])
+    draft_tokens = torch.tensor([5, 10, 20, 30, 40, 50, 60, 70, 80])
+    expected_sizes, dense_positions, correction_positions = _build_verification_layout(
+        [1, 4, 4],
+        4,
+        target_tokens.device,
+    )
+
+    verdict = _build_greedy_verdict_with_layout(
+        target_tokens,
+        draft_tokens,
+        expected_sizes,
+        dense_positions,
+        correction_positions,
         gamma=4,
     )
 
@@ -858,6 +1930,69 @@ def test_native_aclgraph_capacity_counts_failed_capture_attempts():
     runner._execute.assert_called_once()
 
 
+def test_native_aclgraph_replay_orders_task_updates_without_host_sync():
+    model = MagicMock()
+    metadata = SimpleNamespace(
+        use_fused_infer_attention=True,
+        actual_seq_lengths_q=(1,),
+    )
+    update_stream = MagicMock()
+    current_stream = MagicMock()
+    with (
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream",
+            return_value=update_stream,
+        ),
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_graph.torch.npu.current_stream",
+            return_value=current_stream,
+        ),
+    ):
+        runner = NativeACLGraphRunner(model, enabled=True)
+        entry = MagicMock(
+            output=torch.tensor([7]),
+            runtime_validated=True,
+        )
+        runner.entries[("greedy:8|fia:1", 1)] = entry
+        runner._copy_inputs = MagicMock()
+        runner._update_attention_tasks = MagicMock()
+
+        output = runner.run_greedy(
+            torch.tensor([1]),
+            torch.tensor([0]),
+            metadata,
+            vocabulary_size=8,
+        )
+
+    assert output.tolist() == [7]
+    update_stream.wait_stream.assert_called_once_with(current_stream)
+    current_stream.synchronize.assert_not_called()
+    runner._update_attention_tasks.assert_called_once_with(entry)
+    entry.graph.replay.assert_called_once_with()
+
+
+def test_native_aclgraph_greedy_validation_accepts_only_sparse_graph_divergence():
+    reference = torch.arange(128)
+    sparse = reference.clone()
+    sparse[:7] = -1
+    dense = sparse.clone()
+    dense[7] = -1
+
+    assert NativeACLGraphRunner._outputs_match(sparse, reference)
+    assert not NativeACLGraphRunner._outputs_match(dense, reference)
+
+
+def test_native_aclgraph_greedy_validation_rejects_multiple_small_batch_mismatches():
+    reference = torch.arange(16)
+    one_mismatch = reference.clone()
+    one_mismatch[0] = -1
+    two_mismatches = one_mismatch.clone()
+    two_mismatches[1] = -1
+
+    assert NativeACLGraphRunner._outputs_match(one_mismatch, reference)
+    assert not NativeACLGraphRunner._outputs_match(two_mismatches, reference)
+
+
 def test_native_aclgraph_skips_dynamic_fia_tail_without_spending_capture_budget():
     model = MagicMock()
     metadata = SimpleNamespace(
@@ -887,10 +2022,11 @@ def test_native_aclgraph_skips_dynamic_fia_tail_without_spending_capture_budget(
     [
         ((1, 2, 3, 4), True),
         ((4, 8, 12, 16), True),
-        ((1, 5, 6, 10), False),
+        ((1, 5, 6, 10), True),
+        ((1, 5, 5, 9), False),
     ],
 )
-def test_native_aclgraph_only_reuses_uniform_fia_segments(actual_seq_lengths_q, expected):
+def test_native_aclgraph_reuses_full_batch_fia_segments(actual_seq_lengths_q, expected):
     with patch("vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream"):
         runner = NativeACLGraphRunner(MagicMock(), enabled=True)
     runner.set_expected_fia_batch_size(4)
@@ -916,3 +2052,72 @@ def test_native_weight_loader_uses_safe_open_keys_api(tmp_path):
         load_native_qwen2_weights(model, str(tmp_path))
 
     checkpoint.keys.assert_called_once_with()
+
+
+def test_native_nz_conversion_keeps_tied_lm_head_nd_but_converts_transformer():
+    model = MagicMock()
+    model.config.tie_word_embeddings = True
+    lm_head = MagicMock(spec=NativeLMHead)
+    lm_head.bias = None
+    embedding_weight = MagicMock()
+    embedding_weight.device.type = "npu"
+    lm_head.weight = embedding_weight
+    model.lm_head = lm_head
+    model.embed_tokens.weight = embedding_weight
+    transformer = MagicMock(spec=NativeRowLinear)
+    transformer.bias = None
+    transformer.weight = MagicMock()
+    transformer.weight.device.type = "npu"
+    transformer_weight = transformer.weight.data
+    model.modules.return_value = [lm_head, transformer]
+    converted = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_model.ascend_envs.VLLM_ASCEND_ENABLE_NZ",
+            2,
+        ),
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_model.torch_npu.npu_format_cast",
+            return_value=converted,
+        ) as format_cast,
+    ):
+        _maybe_convert_linear_weights_to_nz(model)
+
+    format_cast.assert_called_once_with(transformer_weight, 29)
+    assert model.embed_tokens.weight is embedding_weight
+    assert lm_head.weight is embedding_weight
+    assert transformer.weight.data is converted
+
+
+def test_native_nz_conversion_keeps_biased_linear_weights_in_nd():
+    model = MagicMock()
+    model.config.tie_word_embeddings = False
+    biased = MagicMock(spec=NativeColumnLinear)
+    biased.bias = MagicMock()
+    biased.weight = MagicMock()
+    biased.weight.device.type = "npu"
+    biased_weight = biased.weight.data
+    unbiased = MagicMock(spec=NativeColumnLinear)
+    unbiased.bias = None
+    unbiased.weight = MagicMock()
+    unbiased.weight.device.type = "npu"
+    unbiased_weight = unbiased.weight.data
+    model.modules.return_value = [biased, unbiased]
+    converted = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_model.ascend_envs.VLLM_ASCEND_ENABLE_NZ",
+            2,
+        ),
+        patch(
+            "vllm_ascend.spec_decode.pearl.native_model.torch_npu.npu_format_cast",
+            return_value=converted,
+        ) as format_cast,
+    ):
+        _maybe_convert_linear_weights_to_nz(model)
+
+    format_cast.assert_called_once_with(unbiased_weight, 29)
+    assert biased.weight.data is biased_weight
+    assert unbiased.weight.data is converted
