@@ -43,6 +43,15 @@ from vllm_ascend.spec_decode.pearl.spec_rhythm import (
     SpecRhythmProposalTicket,
     SpecRhythmRuntimeState,
 )
+from vllm_ascend.spec_decode.pearl.tree import (
+    TreeSpeculationPlan,
+    TreeVerificationOutput,
+    verify_greedy_tree_batch,
+)
+from vllm_ascend.spec_decode.tree_kv import (
+    build_tree_kv_compaction_plan,
+    move_kv_cache_slots,
+)
 from vllm_ascend.spec_decode.pearl.topology import PearlProcessGroups, PearlTopology
 
 AUTO_GAMMA_BATCH_SIZES = (1, 2, 4, 8, 16, 32)
@@ -379,6 +388,7 @@ class NativePearlConfig:
     profile_decode_steps: int = 0
     stop_after_profiled_decode_steps: bool = False
     enforce_eager: bool = False
+    enable_mc2: bool = False
     seed: int | None = None
 
     def __post_init__(self) -> None:
@@ -521,6 +531,8 @@ class NativePearlEngine:
         target_model_config = AutoConfig.from_pretrained(config.target_model)
         draft_model_config.pearl_use_production_rope = config.draft_use_production_rope
         target_model_config.pearl_use_production_rope = config.target_use_production_rope
+        draft_model_config.pearl_enable_mc2 = config.enable_mc2
+        target_model_config.pearl_enable_mc2 = config.enable_mc2
         for model_config, dtype_name in (
             (draft_model_config, config.draft_dtype),
             (target_model_config, config.target_dtype),
@@ -1964,6 +1976,160 @@ class NativePearlEngine:
             )
         self._release_cache()
         return results if self.rank == self.topology.target_leader_rank else None
+
+    @torch.inference_mode()
+    def target_tree_forward(
+        self,
+        plans: Sequence[TreeSpeculationPlan],
+        root_token_ids: Sequence[int],
+        draft_token_ids: Sequence[Sequence[int]],
+    ) -> dict[str, Any] | None:
+        """Run the native target forward for request-local tree candidates.
+
+        Tree verification intentionally uses an eager dense-attention path: the
+        explicit ancestor mask cannot be represented by the linear FIA cache
+        contract.  KV writes are nevertheless performed by the same native
+        cache implementation, and the returned target argmax tensors stay on
+        device until the caller asks for the final result.
+        """
+        if self.is_draft:
+            return None
+        plan_list = list(plans)
+        roots = [int(value) for value in root_token_ids]
+        candidates = [list(map(int, row)) for row in draft_token_ids]
+        if self.cache_allocation is None or self.cache_block_tables is None:
+            raise RuntimeError("Allocate a target PEARL cache before tree forward")
+        if not plan_list or len(plan_list) != len(roots) or len(plan_list) != len(candidates):
+            raise ValueError("tree plans, roots and candidate rows must have equal non-zero length")
+        sequence_ids: list[int] = []
+        positions: list[int] = []
+        for sequence_id, (plan, row) in enumerate(zip(plan_list, candidates)):
+            expected = plan.width * plan.depth
+            if len(row) != expected:
+                raise ValueError("tree candidate row does not match its plan")
+            cache_positions = plan.cache_positions
+            assert cache_positions is not None
+            local_positions = [int(value) for value in cache_positions.detach().cpu().tolist()]
+            sequence_ids.extend([sequence_id] * len(local_positions))
+            positions.extend(local_positions)
+        self._ensure_cache_capacity(sequence_ids, positions)
+        input_ids, packed_positions, metadata = self.model.make_tree_attention_metadata(
+            plan_list,
+            roots,
+            candidates,
+            self.cache_allocation.block_tables,
+        )
+        hidden_states = self.model(input_ids, packed_positions, metadata)
+        target_tokens = self.model.compute_greedy_tokens(hidden_states, self.target_vocab_size)
+        target_token_rows: list[torch.Tensor] = []
+        bonus_rows: list[torch.Tensor] = []
+        cursor = 0
+        for plan in plan_list:
+            node_count = int(plan.width) * int(plan.depth)
+            # The first target query predicts the root successor; each later
+            # query predicts a tree node successor. The final query is exposed
+            # separately as the bonus token expected by the verifier.
+            row = target_tokens[cursor : cursor + node_count + 1]
+            target_token_rows.append(row[:-1])
+            bonus_rows.append(row[-1])
+            cursor += node_count + 1
+        return {
+            "target_token_ids": torch.cat(target_token_rows),
+            "bonus_token_ids": torch.stack(bonus_rows),
+            "target_logits": self.model.compute_logits(hidden_states),
+            "cache_slot_mapping": metadata.slot_mapping,
+            "query_count": int(input_ids.numel()),
+            "tree_count": len(plan_list),
+        }
+
+    @torch.inference_mode()
+    def execute_tree_round(
+        self,
+        plans: Sequence[TreeSpeculationPlan],
+        root_token_ids: Sequence[int],
+        draft_token_ids: Sequence[Sequence[int]],
+        parent_indices: torch.Tensor,
+        num_draft_tokens: Sequence[int] | None = None,
+        *,
+        placeholder_token_id: int = -1,
+    ) -> TreeVerificationOutput | None:
+        """Run target tree verification and return device-resident commit data."""
+        target = self.target_tree_forward(plans, root_token_ids, draft_token_ids)
+        if target is None:
+            return None
+        flat_drafts = torch.tensor(
+            [token for row in draft_token_ids for token in row],
+            dtype=torch.long,
+            device=self.device,
+        )
+        return self.verify_tree_outputs(
+            flat_drafts,
+            parent_indices.to(device=self.device),
+            target["target_token_ids"],
+            target["bonus_token_ids"],
+            num_draft_tokens or [len(row) for row in draft_token_ids],
+            max(plan.depth for plan in plans),
+            placeholder_token_id,
+        )
+
+    @torch.inference_mode()
+    def compact_tree_round(
+        self,
+        cache_slot_mapping: torch.Tensor,
+        accepted_node_indices: torch.Tensor,
+        num_draft_tokens: Sequence[int],
+    ) -> None:
+        """Compact accepted tree nodes into each request's linear KV suffix."""
+        if self.is_draft:
+            return
+        if cache_slot_mapping.ndim != 1:
+            raise ValueError("cache_slot_mapping must be a flat tensor")
+        cursor = 0
+        for row, count in enumerate(num_draft_tokens):
+            count = int(count)
+            query_slots = cache_slot_mapping[cursor : cursor + count + 1]
+            accepted = accepted_node_indices[row]
+            source_slots = query_slots[1:]
+            compaction = build_tree_kv_compaction_plan(
+                source_slots,
+                accepted,
+                destination_start=query_slots[0] + 1,
+            )
+            layer_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+            for layer in self.model.layers:
+                key_cache = layer.self_attn.key_cache
+                value_cache = layer.self_attn.value_cache
+                if key_cache is None or value_cache is None:
+                    raise RuntimeError("Tree KV compaction requires allocated layer caches")
+                layer_caches.append((key_cache, value_cache))
+            move_kv_cache_slots(
+                layer_caches,
+                compaction.source_slots,
+                compaction.destination_slots,
+            )
+            cursor += count + 1
+
+    @staticmethod
+    @torch.inference_mode()
+    def verify_tree_outputs(
+        draft_token_ids: torch.Tensor,
+        parent_indices: torch.Tensor,
+        target_token_ids: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        num_draft_tokens: Sequence[int] | None,
+        max_depth: int,
+        placeholder_token_id: int = -1,
+    ) -> TreeVerificationOutput:
+        """Apply the same device-side tree verifier used by the vLLM path."""
+        return verify_greedy_tree_batch(
+            draft_token_ids,
+            parent_indices,
+            num_draft_tokens,
+            target_token_ids,
+            bonus_token_ids,
+            max_depth,
+            placeholder_token_id,
+        )
 
     def _run_packed_hidden(
         self,
@@ -3747,6 +3913,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument(
+        "--enable-mc2",
+        action="store_true",
+        help="Enable the optional TP projection/all-reduce/RMSNorm MC2 path.",
+    )
     parser.add_argument("--prompt")
     parser.add_argument("--repeat-prompt", type=int, default=1)
     parser.add_argument("--gsm8k", help="Path to a GSM8K parquet file.")
@@ -3796,6 +3967,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         enable_prefix_caching=not args.disable_prefix_caching,
         enable_cpu_binding=not args.disable_cpu_binding,
         enforce_eager=args.enforce_eager,
+        enable_mc2=args.enable_mc2,
         seed=args.seed,
     )
     engine = NativePearlEngine(config)

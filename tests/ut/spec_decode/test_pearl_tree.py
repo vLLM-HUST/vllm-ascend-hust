@@ -11,7 +11,10 @@ from vllm_ascend.spec_decode.pearl.tree import (
     select_tree_candidates,
     SpecRhythmTreeCoordinator,
     tree_budget_from_spec_rhythm,
+    verify_greedy_tree,
+    verify_greedy_tree_batch,
 )
+from vllm_ascend.spec_decode.tree_kv import build_tree_kv_compaction_plan
 
 
 def test_tree_mask_exposes_prefix_root_and_ancestors_only():
@@ -32,6 +35,8 @@ def test_tree_plan_positions_and_budget():
     assert plan.positions.tolist() == [4, 5, 6, 7, 5, 6, 7]
     assert plan.candidate_budget == 4
     assert torch.equal(plan.parent_indices, make_spine_first_parents(2, 3))
+    assert plan.cache_positions is not None
+    assert plan.cache_positions.tolist() == list(range(4, 11))
 
 
 def test_selection_preserves_ancestor_chain():
@@ -79,3 +84,56 @@ def test_tree_coordinator_uses_budget_to_choose_depth():
     )
     assert tree is not None
     assert (tree.width, tree.depth, tree.candidate_budget) == (2, 2, 3)
+
+
+def test_device_tree_verifier_follows_ancestor_chain_and_bonus():
+    parents = make_spine_first_parents(2, 2)
+    result = verify_greedy_tree(
+        torch.tensor([10, 11, 20, 21]),
+        parents,
+        torch.tensor([10, 11, 42, 99]),
+        torch.tensor(7),
+        max_depth=2,
+    )
+    assert result.token_ids.tolist() == [10, 11, 7]
+    assert result.accepted_node_indices.tolist() == [0, 1]
+
+
+def test_device_tree_verifier_rejects_first_token_without_host_traversal():
+    result = verify_greedy_tree(
+        torch.tensor([10, 11]),
+        torch.tensor([-1, 0], dtype=torch.int32),
+        torch.tensor([99, 11]),
+        torch.tensor(7),
+        max_depth=2,
+    )
+    assert result.token_ids.tolist() == [99, -1, -1]
+    assert result.accepted_node_indices.tolist() == [-1, -1]
+
+
+def test_variable_width_tree_batch_and_kv_compaction_plan():
+    drafts = torch.tensor([10, 11, 30, 31, 32])
+    parents = torch.tensor([-1, 0, -1, 0, 0], dtype=torch.int32)
+    targets = torch.tensor([10, 11, 30, 31, 99])
+    result = verify_greedy_tree_batch(
+        drafts,
+        parents,
+        [2, 3],
+        targets,
+        torch.tensor([7, 8]),
+        max_depth=2,
+    )
+    assert result.token_ids.shape == (2, 3)
+    assert result.accepted_node_indices.tolist() == [[0, 1], [0, 1]]
+    compaction = build_tree_kv_compaction_plan(
+        torch.tensor([100, 101, 102, 103]),
+        torch.tensor([0, 2, -1], dtype=torch.int32),
+    )
+    assert compaction.source_slots.tolist() == [100, 102]
+    assert compaction.destination_slots.tolist() == [100, 101]
+    shifted = build_tree_kv_compaction_plan(
+        torch.tensor([100, 101, 102]),
+        torch.tensor([0, 2], dtype=torch.int32),
+        destination_start=200,
+    )
+    assert shifted.destination_slots.tolist() == [200, 201]

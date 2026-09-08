@@ -28,7 +28,7 @@ KV 写入和 guarded commit 的生产实现。
 | tree verification | V1/PEARL 基础树 | V1 device tree + KV compaction；新增 SpecRhythm tree coordinator | tree、tree-kv、coordinator 单测 |
 | CUDA Graph/FlashAttention | CUDA-only | NPUGraph/ACLGraph + FIA/paged attention | graph runtime guard、能力脚本 |
 | HCCL mailbox | 不适用于普通 vLLM scheduler | native envelope 带 proposal/request/epoch/width/confidence | HCCL protocol 单测、NPU smoke |
-| PEARL-2 distillation | 没有完整训练器 | acceptance-weighted KL/CE、JSONL trace collator、梯度裁剪、checkpoint API 和训练示例已完成 | `test_pearl_distill.py` |
+| PEARL-2 distillation | 没有完整训练器 | acceptance-weighted KL/CE、JSONL trace collator、teacher rollout、梯度裁剪、checkpoint API 和训练示例已完成 | `test_pearl_distill.py` |
 | draft temperature | README TODO | `NativeSamplingParams.draft_temperature` 已实现；非零 draft 自动避开 draft graph | native engine 静态检查与 API |
 | continuous batching/chunked prefill | README TODO | native admission、prefill chunk、完成替换、抢占已实现 | native engine counters/profile |
 
@@ -43,7 +43,7 @@ KV 写入和 guarded commit 的生产实现。
 | `qkv_rmsnorm_rope` | `pearl/native_model.py` / `DeviceOperator` | Qwen3 BF16 条件融合已接入 |
 | `matmul_allreduce_add_rmsnorm` | `csrc/*mc2*`、编译 fusion pass、`pearl/mc2.py` | custom op、meta 和 fallback 已有；native PEARL 默认不强制启用，避免未验证 CANN 上改变数值/稳定性 |
 | HCCL subgroup/all-reduce | `pearl/topology.py`、`native_engine.py` | draft/target/verification/correction group 已接入 |
-| tree KV compaction | `spec_decode/tree_kv.py` | NPU scatter 更新与 CPU fallback 已接入 |
+| tree KV compaction | `spec_decode/tree_kv.py` | 接受路径 compaction plan、NPU scatter 更新与 CPU fallback 已接入 |
 
 运行 `examples/check_specslo_capabilities.py --tp-size 3` 可在目标容器中输出
 ACLGraph、FIA、paged attention、RoPE、tree 和 MC2 的实际导出状态。能力为 false
@@ -64,7 +64,9 @@ proposal，同时 draft 生成另一 home batch 的 proposal；完整接受后�
 1. `SpecRhythmTreeCoordinator` 将每个 request 的标量预算转换成 width/depth；
 2. `select_tree_candidates` 在评分选择时闭包包含祖先，避免发送无父节点的分支；
 3. `build_tree_attention_mask` 生成 CANN/V1 约定的 blocked=True mask；
-4. 目标侧最终 token 比较仍复用 V1 `verify_greedy_tree*` 和 Ascend KV compaction。
+4. 目标侧提供 native tree forward：唯一 cache position、显式 ancestor mask、目标
+   token/bonus 分离；最终比较复用设备侧 `verify_greedy_tree*`，接受路径可生成
+   KV compaction plan。
 
 这使策略和设备树基础设施可以组合；native PEARL 的线性 proposal 默认保持不变，
 需要树模式时由上层 scheduler 传入 tree plan，避免影响已有线性 graph bucket。
@@ -75,14 +77,13 @@ proposal，同时 draft 生成另一 home batch 的 proposal；完整接受后�
 
 - MC2 custom kernel 是否稳定超过生产 `matmul + HCCL all-reduce`，以及其 TP3
   的数值误差和 graph replay 行为；
-- tree proposal 的 native target forward、分支 KV 提交和拒绝后回滚在所有
-  Qwen/Llama 结构上的端到端吞吐；
-- 通用 vLLM V1 服务进程自动创建跨模型 HCCL worker。当前提供的是
-  `SpecRhythmScheduler` metadata/admission adapter，实际跨进程执行仍由 native
-  PEARL engine 承担；
-- PEARL-2 的完整 teacher rollout 和大规模权重质量回归。JSONL 数据管线、蒸馏 loss、
-  optimizer step 与 checkpoint 格式已经可运行，但 teacher 数据生成和模型产出需要
-  项目级实验；
+- tree proposal 的 native target forward、分支 KV 提交和拒绝后回滚已经实现代码路径，
+  仍需在所有 Qwen/Llama 结构上进行端到端吞吐与数值回归；
+- 通用 vLLM V1 服务进程自动创建跨模型 HCCL worker。当前
+  `PearlDualModelScheduler` 已能并行调度两个外部 worker 回调并提交验证生命周期，
+  仍需接入具体上游 V1 worker 生命周期；
+- PEARL-2 的 teacher rollout、JSONL 数据管线、蒸馏 loss、optimizer step 与 checkpoint
+  格式已经可运行，仍需大规模训练和权重质量回归；
 - CANN 各版本动态 graph bucket 的内存上限、长上下文和多租户抢占矩阵。
 
 这些限制已在能力脚本和主工作记录中写明。任何性能报告都必须注明模型、TP、

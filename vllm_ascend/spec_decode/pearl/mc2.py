@@ -30,6 +30,41 @@ class MC2Capability:
     reason: str
 
 
+def resolve_hccl_comm_name(
+    process_group: dist.ProcessGroup | None = None,
+    *,
+    device: torch.device | str | None = None,
+    rank: int | None = None,
+) -> str:
+    """Resolve the communicator handle expected by the Ascend MC2 op.
+
+    vLLM-Ascend has used both ``get_hccl_comm_name`` and backend-specific
+    process-group helpers across CANN releases.  Keep this compatibility
+    probing isolated so the numerical fallback remains usable when no helper
+    is exposed (for example in CPU unit tests).
+    """
+    if process_group is None or not dist.is_available() or not dist.is_initialized():
+        return ""
+    try:
+        backend = process_group._get_backend(torch.device(device or "npu"))  # type: ignore[attr-defined]
+    except (AttributeError, RuntimeError, TypeError):
+        return ""
+    getter = getattr(backend, "get_hccl_comm_name", None)
+    if getter is None:
+        getter = getattr(process_group, "get_hccl_comm_name", None)
+    if getter is None:
+        return ""
+    candidates = [rank] if rank is not None else [None, dist.get_rank()]
+    for candidate in candidates:
+        try:
+            value = getter() if candidate is None else getter(candidate)
+        except (TypeError, RuntimeError, AttributeError):
+            continue
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _matmul_op() -> Any | None:
     try:
         namespace = getattr(torch.ops, "_C_ascend")
@@ -50,7 +85,13 @@ def detect_mc2_capability(
     if tp_size < 1:
         raise ValueError("tp_size must be positive")
     if resolved.type != "npu":
-        return MC2Capability(False, str(resolved), int(tp_size), "matmul_allreduce_add_rmsnorm", "MC2 is an Ascend NPU operator")
+        return MC2Capability(
+            False,
+            str(resolved),
+            int(tp_size),
+            "matmul_allreduce_add_rmsnorm",
+            "MC2 is an Ascend NPU operator",
+        )
     global _MC2_LOAD_ATTEMPTED
     if not _MC2_LOAD_ATTEMPTED:
         _MC2_LOAD_ATTEMPTED = True
@@ -64,10 +105,28 @@ def detect_mc2_capability(
         except Exception:  # optional extension failures must keep fallback usable
             pass
     if _matmul_op() is None:
-        return MC2Capability(False, str(resolved), int(tp_size), "matmul_allreduce_add_rmsnorm", "vllm_ascend custom extension is not loaded")
+        return MC2Capability(
+            False,
+            str(resolved),
+            int(tp_size),
+            "matmul_allreduce_add_rmsnorm",
+            "vllm_ascend custom extension is not loaded",
+        )
     if require_fused and tp_size < 2:
-        return MC2Capability(False, str(resolved), int(tp_size), "matmul_allreduce_add_rmsnorm", "fused MC2 is only useful for tensor-parallel groups")
-    return MC2Capability(True, str(resolved), int(tp_size), "matmul_allreduce_add_rmsnorm", "custom AscendC/aclnn dispatch is registered")
+        return MC2Capability(
+            False,
+            str(resolved),
+            int(tp_size),
+            "matmul_allreduce_add_rmsnorm",
+            "fused MC2 is only useful for tensor-parallel groups",
+        )
+    return MC2Capability(
+        True,
+        str(resolved),
+        int(tp_size),
+        "matmul_allreduce_add_rmsnorm",
+        "custom AscendC/aclnn dispatch is registered",
+    )
 
 
 def matmul_allreduce_add_rmsnorm_or_fallback(
@@ -84,6 +143,7 @@ def matmul_allreduce_add_rmsnorm_or_fallback(
     is_gather_add_out: bool = False,
     process_group: dist.ProcessGroup | None = None,
     use_fused: bool | None = None,
+    strict_fused: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dispatch MC2 or return the equivalent matmul/all-reduce/RMSNorm pair."""
 
@@ -97,18 +157,22 @@ def matmul_allreduce_add_rmsnorm_or_fallback(
     capability = detect_mc2_capability(x.device, tp_rank_size)
     dispatch_fused = capability.available if use_fused is None else bool(use_fused) and capability.available
     if dispatch_fused and _matmul_op() is not None:
-        return _matmul_op()(  # type: ignore[misc]
-            x,
-            weight,
-            residual,
-            gamma,
-            group_tp,
-            int(tp_rank_size),
-            int(tp_rank_id),
-            float(epsilon),
-            bool(is_trans_b),
-            bool(is_gather_add_out),
-        )
+        try:
+            return _matmul_op()(  # type: ignore[misc]
+                x,
+                weight,
+                residual,
+                gamma,
+                group_tp,
+                int(tp_rank_size),
+                int(tp_rank_id),
+                float(epsilon),
+                bool(is_trans_b),
+                bool(is_gather_add_out),
+            )
+        except Exception as error:
+            if strict_fused:
+                raise RuntimeError("MC2 fused dispatch failed in strict mode") from error
     if is_trans_b:
         matmul = F.linear(x, weight)
     else:
@@ -131,4 +195,5 @@ __all__ = [
     "capability_dict",
     "detect_mc2_capability",
     "matmul_allreduce_add_rmsnorm_or_fallback",
+    "resolve_hccl_comm_name",
 ]

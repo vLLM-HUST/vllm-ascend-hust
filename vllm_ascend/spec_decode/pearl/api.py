@@ -95,6 +95,7 @@ class PEARLConfig:
     enable_cpu_binding: bool = True
     profile_decode_steps: int = 0
     stop_after_profiled_decode_steps: bool = False
+    enable_mc2: bool = False
     seed: int | None = None
     worker_timeout_seconds: float = 300.0
     draft_config: PEARLModelGroupConfig = field(init=False, repr=False)
@@ -276,6 +277,7 @@ class PEARLConfig:
             profile_decode_steps=self.profile_decode_steps,
             stop_after_profiled_decode_steps=self.stop_after_profiled_decode_steps,
             enforce_eager=self.enforce_eager,
+            enable_mc2=self.enable_mc2,
             seed=self.seed,
         )
 

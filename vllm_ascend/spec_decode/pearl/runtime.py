@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from time import perf_counter
+from typing import Any, Callable
 
 import torch
 
@@ -16,6 +19,7 @@ from vllm_ascend.spec_decode.pearl.protocol import (
 )
 from vllm_ascend.spec_decode.pearl.topology import PearlProcessGroups
 from vllm_ascend.spec_decode.pearl.verifier import PearlTargetVerifier
+from vllm_ascend.spec_decode.pearl.spec_rhythm import SpecRhythmSchedule, SpecRhythmScheduler
 
 
 @dataclass(frozen=True)
@@ -78,3 +82,65 @@ class PearlRoundExecutor:
             source_rank=topology.target_leader_rank,
             device=self.device,
         )
+
+
+@dataclass(frozen=True)
+class PearlDualBatchResult:
+    """Results from one concurrently scheduled draft/target window."""
+
+    schedule: SpecRhythmSchedule
+    draft_result: Any
+    target_result: Any
+    elapsed_seconds: float
+
+
+class PearlDualModelScheduler:
+    """Bridge SpecRhythm metadata to a generic two-model service.
+
+    ``draft_runner`` and ``target_runner`` are called concurrently with
+    ``(schedule, role)``. They own model execution and communication; this
+    adapter only establishes the lifecycle boundary and returns both results
+    as one atomic window. A worker calls :meth:`finish_verification` after
+    target verification to advance prefix epochs and promote eager tickets.
+    """
+
+    def __init__(
+        self,
+        scheduler: SpecRhythmScheduler,
+        draft_runner: Callable[[SpecRhythmSchedule, str], Any],
+        target_runner: Callable[[SpecRhythmSchedule, str], Any],
+    ) -> None:
+        self.scheduler = scheduler
+        self.draft_runner = draft_runner
+        self.target_runner = target_runner
+
+    def execute_step(
+        self,
+        *,
+        projected_wait_ms: float,
+        context_len: int,
+        draft_token_budget: int | None = None,
+        batch_size: int | None = None,
+    ) -> PearlDualBatchResult:
+        schedule = self.scheduler.schedule(
+            projected_wait_ms=projected_wait_ms,
+            context_len=context_len,
+            draft_token_budget=draft_token_budget,
+            batch_size=batch_size,
+        )
+        started = perf_counter()
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pearl") as pool:
+            draft_future = pool.submit(self.draft_runner, schedule, "draft")
+            target_future = pool.submit(self.target_runner, schedule, "target")
+            draft_result = draft_future.result()
+            target_result = target_future.result()
+        return PearlDualBatchResult(
+            schedule=schedule,
+            draft_result=draft_result,
+            target_result=target_result,
+            elapsed_seconds=perf_counter() - started,
+        )
+
+    def finish_verification(self, request_index: int, **kwargs: Any) -> Any:
+        """Commit one target verdict through the scheduler's guarded lifecycle."""
+        return self.scheduler.finish_verification(request_index, **kwargs)

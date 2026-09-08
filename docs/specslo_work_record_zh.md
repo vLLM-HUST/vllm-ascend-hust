@@ -86,7 +86,7 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
 | 任意 TP 和均匀 head 切分 | Q/KV head、MLP、词表不能被 3 整除时 shape 不合法或通信浪费 | 参数/head/MLP/vocab padding、逻辑行裁剪；接受率和 padding 成本需单独评估 |
 | 动态 shape graph | CANN graph capture 需要稳定 shape，频繁 capture 会耗尽内存 | 逻辑 proposal width 与物理 graph shape 分离，target 行数 bucket 化，超限 eager fallback |
 | CUDA 异步输出和 KV 提交 | 拒绝后缀可能已写入设备 cache，旧结果可能晚到 | proposal/epoch 校验、commit/rollback 边界、失效后缀清理和状态快照 |
-| PEARL-2 训练/蒸馏流水线 | 参考仓库仅有静态训练接口，缺少 Ascend 训练 kernel/数据管线 | 本次只迁移推理侧；训练和权重产出仍需单独设计 |
+| PEARL-2 训练/蒸馏流水线 | 参考仓库仅有静态训练接口，缺少 Ascend 训练 kernel/数据管线 | 已补齐 teacher rollout、JSONL trace、acceptance-weighted loss、训练 step 与 checkpoint；真实训练质量仍需验证 |
 
 ## 4. 已完成的自研设计
 
@@ -96,8 +96,9 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
    接收端拒绝过期、错请求和不匹配宽度，解决异步 HCCL 下的状态污染。
 3. **SpecRhythm 控制面**：记录接受率 EMA、SLO urgency、draft/verify 成本，
    按预算和队列状态选择 gamma、继续 draft 或 target 验证。
-4. **设备侧树基础设施**：实现树节点索引、祖先路径、KV 位置映射和验证结果
-   回写的数据结构；通用 V1 tree verification 已有单元测试。
+4. **设备侧树基础设施**：实现树节点索引、祖先路径、唯一 KV 位置映射、native
+   target tree forward、显式 ancestor mask、验证结果回写和接受路径 KV compaction
+   plan；通用 V1 tree verification 已有单元测试。
 5. **Ascend graph/cache 适配**：物理 graph bucket、128-token page、完成行
    padding、prefix reuse、生产 RoPE 和 fused attention fallback 已接入 native
    runtime。
@@ -106,20 +107,18 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
 
 ## 5. 仍需设计或验证的内容
 
-- **真正高于分离路径的 TP3 MC2 kernel（硬件验证）**：custom AscendC MC2、
-  meta、编译 fusion pass 和 `pearl/mc2.py` dispatch/fallback 已完成；还没有在
-  目标 CANN/固件版本上证明稳定地超过生产 all-reduce + matmul。
-- **SpecRhythm 与树状投机解码合并（策略层已完成，native tree forward 待实机）**：
-  `SpecRhythmTreeCoordinator`、父依赖候选选择和 CANN/V1 tree mask 已完成；native
-  线性 PEARL 默认路径保持不变，树模式的 target forward/KV 分支回滚需单独压测。
-- **通用 vLLM 服务路径（metadata 层已完成）**：`SpecRhythmScheduler` 提供
-  admission、双 batch 排程、preempt/reactivate 和 global roofline；跨模型
-  worker 自动建组仍需上游 V1 scheduler 生命周期接口。
-- **PEARL-2 训练/蒸馏（训练原语已完成）**：
-  `pearl/distill.py` 提供 acceptance-weighted KL/CE、梯度裁剪、optimizer step
-  和 checkpoint；JSONL trace loader/collator 与
-  `examples/train_nano_pearl_distill.py` 已提供，teacher rollout、训练质量回归
-  仍需项目实验。
+- **TP3 MC2 的实机验证**：custom AscendC MC2、meta、编译 fusion pass、communicator
+  解析和 `pearl/mc2.py` dispatch/fallback 已完成；仍没有在目标 CANN/固件版本上
+  证明稳定地超过生产 all-reduce + matmul。
+- **SpecRhythm 与树状投机解码的实机回归**：策略、native target forward、唯一
+  cache position、KV compaction plan 和 rejection-safe 数据结构已完成；仍需在真实
+  Qwen/Llama 模型上压测分支提交、回滚和数值一致性。
+- **通用 vLLM 服务路径**：`SpecRhythmScheduler` 与
+  `PearlDualModelScheduler` 已提供 admission、双 batch 并行回调、preempt/reactivate、
+  global roofline 和 verification commit；仍需绑定上游 V1 scheduler 的 worker 生命周期。
+- **PEARL-2 训练/蒸馏**：`pearl/distill.py` 已提供 teacher rollout、JSONL trace
+  loader/collator、acceptance-weighted KL/CE、梯度裁剪、optimizer step 和 checkpoint；
+  仍需大规模训练、teacher/student 权重产出和质量回归。
 - **生产级动态 shape graph（运行时 guard 已完成，版本矩阵待验证）**：native
   graph 已按 shape bucket 捕获、回放、首轮 eager 对照和容量 fallback；仍需按
   CANN 版本和真实到达分布建立 capture/replay 兼容矩阵。
@@ -151,6 +150,20 @@ target 验证；调度器按照 SLO 紧迫度、接受率和设备 roofline 预�
   JSON 能力矩阵；在 NPU 上会额外报告 ACLGraph、FIA、paged attention、RoPE 和
   MC2 custom op 的导出状态。
 - `compileall` 和 `git diff --check` 通过。
+
+本次继续实现并回归：
+
+- native tree target forward：每个分支使用唯一 cache position，显式 ancestor mask
+  强制走 dense correctness path；增加设备侧 batch verifier、bonus token 分离和
+  接受路径 KV compaction/rollback API。
+- 通用 `PearlDualModelScheduler`：基于 SpecRhythm schedule 并行提交 draft/target
+  worker 回调，并提供 verification commit 生命周期入口。
+- PEARL-2 teacher rollout：支持批量 prompt、temperature、EOS 截断、padding mask，
+  以及 `collect_pearl_teacher_trace.py` JSONL CLI。
+- TP residual MC2：增加 HCCL communicator 名称兼容探测、`enable_mc2` 配置和
+  fused-op 失败自动 fallback；默认关闭，需在目标 CANN 上显式开启验证。
+- 本轮相关单测为 `132 passed, 14 warnings`；完整 `tests/ut/spec_decode` 还受容器
+  缺少 `numba` 影响，ngram proposer 收集失败，其余可收集用例通过。
 
 参考仓库逐文件审计见
 [`atc26v0_feature_audit_zh.md`](atc26v0_feature_audit_zh.md)。该审计把上游

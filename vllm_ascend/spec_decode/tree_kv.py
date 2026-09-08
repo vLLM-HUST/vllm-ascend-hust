@@ -2,9 +2,60 @@
 """Token-granular KV compaction used after tree verification."""
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 import torch_npu
+
+
+@dataclass(frozen=True)
+class TreeKVCompactionPlan:
+    """Device-indexed source/destination slots for an accepted tree path."""
+
+    source_slots: torch.Tensor
+    destination_slots: torch.Tensor
+    accepted_node_indices: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.source_slots.ndim != 1 or self.destination_slots.shape != self.source_slots.shape:
+            raise ValueError("tree KV compaction slot tensors must be aligned 1-D tensors")
+        if self.accepted_node_indices.shape != self.source_slots.shape:
+            raise ValueError("accepted node indices must align with source slots")
+
+
+def build_tree_kv_compaction_plan(
+    node_slots: torch.Tensor,
+    accepted_node_indices: torch.Tensor,
+    *,
+    destination_start: torch.Tensor | int | None = None,
+) -> TreeKVCompactionPlan:
+    """Build a compact path move without reading NPU indices on the host.
+
+    ``node_slots`` is the physical KV slot for each request-local draft node;
+    ``accepted_node_indices`` contains ``-1`` for rejected/unused depths. The
+    destination sequence is contiguous and starts at the first node slot,
+    allowing callers to overwrite a linear PEARL prefix after verification.
+    """
+    if node_slots.ndim != 1 or accepted_node_indices.ndim != 1:
+        raise ValueError("tree KV compaction inputs must be 1-D")
+    if accepted_node_indices.numel() == 0:
+        return TreeKVCompactionPlan(
+            node_slots.new_empty((0,)),
+            node_slots.new_empty((0,)),
+            accepted_node_indices.to(dtype=torch.long),
+        )
+    if (accepted_node_indices >= node_slots.numel()).any() or (accepted_node_indices < -1).any():
+        raise ValueError("accepted tree node index is outside node_slots")
+    valid = accepted_node_indices >= 0
+    selected = accepted_node_indices[valid].to(dtype=torch.long)
+    source = torch.index_select(node_slots, 0, selected)
+    first_destination = node_slots[:1] if destination_start is None else torch.as_tensor(
+        destination_start, dtype=node_slots.dtype, device=node_slots.device
+    ).reshape(1)
+    destination = first_destination + torch.arange(
+        selected.numel(), dtype=node_slots.dtype, device=node_slots.device
+    )
+    return TreeKVCompactionPlan(source, destination, selected)
 
 
 def verify_greedy_tree_device(

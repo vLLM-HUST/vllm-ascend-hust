@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import torch
 
@@ -56,7 +56,8 @@ def build_tree_attention_mask(
 
     if prefix_len < 0 or max_model_len <= 0:
         raise ValueError("prefix_len must be non-negative and max_model_len positive")
-    if prefix_len + depth >= max_model_len:
+    query_len = 1 + width * depth
+    if prefix_len + query_len > max_model_len:
         raise ValueError("tree query positions exceed max_model_len")
     parents = make_spine_first_parents(width, depth).tolist()
     levels = _node_levels(width, depth)
@@ -91,6 +92,10 @@ class TreeSpeculationPlan:
     parent_indices: torch.Tensor
     positions: torch.Tensor
     attention_mask: torch.Tensor
+    # Logical depth positions are useful to schedulers, but KV cache writes
+    # need a unique slot per sibling branch.  Native target forward consumes
+    # this separate physical-position vector.
+    cache_positions: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.candidate_budget < 1 or self.candidate_budget > self.width * self.depth:
@@ -101,6 +106,13 @@ class TreeSpeculationPlan:
             raise ValueError("positions must include root and every tree node")
         if tuple(self.attention_mask.shape) != (self.width * self.depth + 1, self.max_model_len):
             raise ValueError("attention_mask does not match tree shape")
+        if self.cache_positions is None:
+            object.__setattr__(self, "cache_positions", self.positions.clone())
+        assert self.cache_positions is not None
+        if self.cache_positions.numel() != self.width * self.depth + 1:
+            raise ValueError("cache_positions must include root and every tree node")
+        if self.cache_positions.ndim != 1 or self.cache_positions.unique().numel() != self.cache_positions.numel():
+            raise ValueError("cache_positions must be unique within one tree")
 
 
 def build_tree_speculation_plan(
@@ -136,6 +148,12 @@ def build_tree_speculation_plan(
         parent_indices=parents,
         positions=positions,
         attention_mask=mask,
+        cache_positions=torch.arange(
+            prefix_len,
+            prefix_len + width * depth + 1,
+            dtype=torch.int32,
+            device=device,
+        ),
     )
 
 
@@ -145,6 +163,193 @@ class TreeCandidateSelection:
 
     indices: torch.Tensor
     token_ids: torch.Tensor
+
+
+@dataclass(frozen=True)
+class TreeVerificationOutput:
+    """Greedy tree output and request-local accepted node indices."""
+
+    token_ids: torch.Tensor
+    accepted_node_indices: torch.Tensor
+
+
+def _verify_greedy_tree_uniform(
+    draft_token_ids: torch.Tensor,
+    parent_indices: torch.Tensor,
+    target_token_ids: torch.Tensor,
+    bonus_token_id: torch.Tensor,
+    max_depth: int,
+    placeholder_token_id: int,
+) -> TreeVerificationOutput:
+    if draft_token_ids.ndim != 1 or parent_indices.shape != draft_token_ids.shape:
+        raise ValueError("draft tokens and parent indices must be 1-D and aligned")
+    if target_token_ids.shape != draft_token_ids.shape:
+        raise ValueError("target_token_ids must contain one prediction per draft node")
+    if bonus_token_id.numel() != 1:
+        raise ValueError("one bonus token is required per tree")
+    if max_depth < 1:
+        raise ValueError("max_depth must be positive")
+
+    device = draft_token_ids.device
+    node_count = draft_token_ids.numel()
+    node_ids = torch.arange(node_count, dtype=torch.int32, device=device)
+    no_match = torch.full_like(node_ids, node_count)
+    output = torch.full(
+        (max_depth + 1,), placeholder_token_id, dtype=draft_token_ids.dtype, device=device
+    )
+    accepted = torch.full((max_depth,), -1, dtype=torch.int32, device=device)
+    current_parent = torch.tensor(-1, dtype=torch.int32, device=device)
+    prediction_index = torch.tensor(0, dtype=torch.long, device=device)
+    active = torch.tensor(True, dtype=torch.bool, device=device)
+
+    # Fixed iteration count keeps the traversal device-side and makes the
+    # helper suitable for NPU eager mode and future ACLGraph capture.
+    for depth in range(max_depth):
+        prediction = target_token_ids[prediction_index]
+        output[depth] = torch.where(
+            active,
+            prediction,
+            torch.as_tensor(placeholder_token_id, dtype=output.dtype, device=device),
+        )
+        matches = (
+            (parent_indices == current_parent)
+            & (draft_token_ids == prediction)
+            & active
+        )
+        selected = torch.where(matches, node_ids, no_match).amin()
+        matched = selected < node_count
+        accepted[depth] = torch.where(
+            matched,
+            selected,
+            torch.as_tensor(-1, dtype=accepted.dtype, device=device),
+        )
+        prediction_index = torch.where(
+            matched, selected.to(torch.long) + 1, prediction_index
+        )
+        current_parent = torch.where(matched, selected, current_parent)
+        active = matched
+
+    bonus = bonus_token_id.reshape(()).to(dtype=output.dtype)
+    output[max_depth] = torch.where(
+        active,
+        bonus,
+        torch.as_tensor(placeholder_token_id, dtype=output.dtype, device=device),
+    )
+    return TreeVerificationOutput(output, accepted)
+
+
+def verify_greedy_tree(
+    draft_token_ids: torch.Tensor,
+    parent_indices: torch.Tensor,
+    target_token_ids: torch.Tensor,
+    bonus_token_id: torch.Tensor | int,
+    max_depth: int,
+    placeholder_token_id: int = -1,
+) -> TreeVerificationOutput:
+    """Verify one request-local greedy tree without host-side traversal.
+
+    ``target_token_ids`` contains the target argmax for each draft-node query;
+    ``bonus_token_id`` is the target argmax at the accepted path frontier.
+    Nodes are expected in topological order and use ``-1`` for root parents.
+    """
+    bonus = torch.as_tensor(
+        bonus_token_id, dtype=draft_token_ids.dtype, device=draft_token_ids.device
+    )
+    return _verify_greedy_tree_uniform(
+        draft_token_ids,
+        parent_indices,
+        target_token_ids,
+        bonus,
+        max_depth,
+        placeholder_token_id,
+    )
+
+
+def verify_greedy_tree_batch(
+    draft_token_ids: torch.Tensor,
+    parent_indices: torch.Tensor,
+    num_draft_tokens: Sequence[int] | None,
+    target_token_ids: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    max_depth: int,
+    placeholder_token_id: int = -1,
+) -> TreeVerificationOutput:
+    """Verify uniform or variable-width request-major tree tensors.
+
+    Flat tensors are accepted for direct vLLM metadata use. Variable-width
+    batches use a short Python loop over requests, while every token traversal
+    remains on the originating device.
+    """
+    if draft_token_ids.ndim == 2:
+        batch_size, width = draft_token_ids.shape
+        if parent_indices.numel() != draft_token_ids.numel() or target_token_ids.numel() != draft_token_ids.numel():
+            raise ValueError("2-D tree tensors must have matching node counts")
+        if bonus_token_ids.numel() != batch_size:
+            raise ValueError("bonus_token_ids must have one value per request")
+        drafts = draft_token_ids
+        parents = parent_indices.reshape(batch_size, width)
+        targets = target_token_ids.reshape(batch_size, width)
+        counts = (
+            [width] * batch_size
+            if num_draft_tokens is None
+            else [int(value) for value in num_draft_tokens]
+        )
+        if any(value != width for value in counts):
+            raise ValueError("2-D tree tensors require uniform num_draft_tokens")
+    elif draft_token_ids.ndim == 1:
+        if num_draft_tokens is None:
+            raise ValueError("num_draft_tokens is required for flat tree tensors")
+        counts = [int(value) for value in num_draft_tokens]
+        if any(value <= 0 for value in counts) or sum(counts) != draft_token_ids.numel():
+            raise ValueError("num_draft_tokens must partition the flat draft tensor")
+        if parent_indices.shape != draft_token_ids.shape or target_token_ids.shape != draft_token_ids.shape:
+            raise ValueError("flat tree tensors must have matching shapes")
+        if len(set(counts)) == 1:
+            batch_size, width = len(counts), counts[0]
+            drafts = draft_token_ids.reshape(batch_size, width)
+            parents = parent_indices.reshape(batch_size, width)
+            targets = target_token_ids.reshape(batch_size, width)
+        else:
+            if bonus_token_ids.numel() != len(counts):
+                raise ValueError("bonus_token_ids must have one value per request")
+            rows: list[TreeVerificationOutput] = []
+            cursor = 0
+            for row, count in enumerate(counts):
+                rows.append(
+                    verify_greedy_tree(
+                        draft_token_ids[cursor : cursor + count],
+                        parent_indices[cursor : cursor + count],
+                        target_token_ids[cursor : cursor + count],
+                        bonus_token_ids[row],
+                        max_depth,
+                        placeholder_token_id,
+                    )
+                )
+                cursor += count
+            return TreeVerificationOutput(
+                torch.stack([row.token_ids for row in rows]),
+                torch.stack([row.accepted_node_indices for row in rows]),
+            )
+    else:
+        raise ValueError("draft_token_ids must be a 1-D or 2-D tensor")
+
+    if len(counts) != drafts.shape[0] or bonus_token_ids.numel() != drafts.shape[0]:
+        raise ValueError("tree batch dimensions do not match")
+    rows = [
+        verify_greedy_tree(
+            drafts[index],
+            parents[index],
+            targets[index],
+            bonus_token_ids[index],
+            max_depth,
+            placeholder_token_id,
+        )
+        for index in range(drafts.shape[0])
+    ]
+    return TreeVerificationOutput(
+        torch.stack([row.token_ids for row in rows]),
+        torch.stack([row.accepted_node_indices for row in rows]),
+    )
 
 
 def select_tree_candidates(
@@ -245,10 +450,13 @@ class SpecRhythmTreeCoordinator:
 __all__ = [
     "TreeCandidateSelection",
     "TreeSpeculationPlan",
+    "TreeVerificationOutput",
     "SpecRhythmTreeCoordinator",
     "build_tree_attention_mask",
     "build_tree_speculation_plan",
     "make_spine_first_parents",
     "select_tree_candidates",
     "tree_budget_from_spec_rhythm",
+    "verify_greedy_tree",
+    "verify_greedy_tree_batch",
 ]

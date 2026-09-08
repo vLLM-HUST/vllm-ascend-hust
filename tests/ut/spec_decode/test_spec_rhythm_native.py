@@ -8,7 +8,9 @@ from vllm_ascend.spec_decode.pearl.spec_rhythm import (
     SpecRhythmBudgetShaper,
     SpecRhythmPipelineController,
     SpecRhythmRuntimeState,
+    SpecRhythmScheduler,
 )
+from vllm_ascend.spec_decode.pearl.runtime import PearlDualModelScheduler
 
 
 def _states(count=4):
@@ -131,6 +133,25 @@ def test_full_acceptance_promotes_matching_eager_continuation():
     assert eager.lifecycle is ProposalLifecycle.AVAILABLE
     assert controller.ready[0] is eager
     assert states[0].prefix_epoch == eager.required_prefix_epoch == 1
+
+
+def test_dual_model_scheduler_runs_both_runners_and_returns_schedule():
+    scheduler = SpecRhythmScheduler(
+        SpecRhythmBudgetShaper(min_gamma=1, max_gamma=2), max_num_seqs=2
+    )
+    scheduler.admit(0)
+    calls = []
+
+    def runner(schedule, role):
+        calls.append((role, schedule.execution.phase))
+        return role
+
+    adapter = PearlDualModelScheduler(scheduler, runner, runner)
+    result = adapter.execute_step(projected_wait_ms=0.0, context_len=8)
+    assert {value[0] for value in calls} == {"draft", "target"}
+    assert result.draft_result in {"draft", "target"}
+    assert result.target_result in {"draft", "target"}
+    assert result.elapsed_seconds >= 0.0
 
 
 def test_rejection_discards_eager_continuation_and_advances_epoch():

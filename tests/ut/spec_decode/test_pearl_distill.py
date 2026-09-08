@@ -6,10 +6,12 @@ from vllm_ascend.spec_decode.pearl.distill import (
     PearlDistillationConfig,
     load_pearl_distillation_checkpoint,
     collate_pearl_distillation_records,
+    collect_pearl_teacher_trace,
     load_pearl_distillation_records,
     pearl_distillation_loss,
     save_pearl_distillation_checkpoint,
     train_pearl_distillation_step,
+    write_pearl_teacher_trace,
 )
 
 
@@ -21,6 +23,19 @@ class _TinyStudent(torch.nn.Module):
     def forward(self, input_ids, **_kwargs):
         hidden = torch.nn.functional.one_hot(input_ids, num_classes=self.proj.in_features).float()
         return {"logits": self.proj(hidden)}
+
+
+class _TinyTeacher(torch.nn.Module):
+    def __init__(self, vocab_size: int = 5):
+        super().__init__()
+        self.vocab_size = vocab_size
+
+    def forward(self, input_ids, **_kwargs):
+        logits = torch.full(
+            (*input_ids.shape, self.vocab_size), -1.0, device=input_ids.device
+        )
+        logits[..., 1] = 4.0
+        return type("Output", (), {"logits": logits})()
 
 
 def test_distillation_loss_is_finite_and_teacher_is_detached():
@@ -92,3 +107,16 @@ def test_jsonl_trace_loader_and_collator_pad_rows(tmp_path):
     assert batch["teacher_logits"].shape == (2, 2, 3)
     assert batch["attention_mask"].tolist() == [[True, True], [True, False]]
     assert "labels" in batch and "acceptance_mask" in batch
+
+
+def test_teacher_rollout_and_jsonl_writer(tmp_path):
+    records = collect_pearl_teacher_trace(
+        _TinyTeacher(), torch.tensor([[1, 2], [2, 3]]), max_new_tokens=2
+    )
+    assert len(records) == 2
+    assert len(records[0]["input_ids"]) == 4
+    assert len(records[0]["teacher_logits"]) == 4
+    trace = tmp_path / "teacher.jsonl"
+    assert write_pearl_teacher_trace(trace, records) == 2
+    loaded = load_pearl_distillation_records(trace)
+    assert loaded[0]["teacher_logits"][0][1] == 4.0

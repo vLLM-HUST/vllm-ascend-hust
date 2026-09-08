@@ -21,6 +21,133 @@ import torch
 import torch.nn.functional as F
 
 
+def _extract_logits(outputs: Any) -> torch.Tensor:
+    """Normalize common Transformers/native model outputs to a logits tensor."""
+    if isinstance(outputs, torch.Tensor):
+        logits = outputs
+    elif hasattr(outputs, "logits"):
+        logits = outputs.logits
+    elif isinstance(outputs, Mapping) and "logits" in outputs:
+        logits = outputs["logits"]
+    else:
+        raise TypeError("Teacher model output must expose logits")
+    if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
+        raise ValueError("Teacher logits must have shape [batch, tokens, vocab]")
+    return logits
+
+
+@torch.inference_mode()
+def collect_pearl_teacher_trace(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    *,
+    attention_mask: torch.Tensor | None = None,
+    max_new_tokens: int = 0,
+    temperature: float = 0.0,
+    eos_token_ids: int | Iterable[int] | None = None,
+    stop_at_eos: bool = True,
+) -> list[dict[str, Any]]:
+    """Collect an online PEARL-2 teacher trace for a batch of prompts.
+
+    The trace contains one target-logit row per emitted token.  Generation is
+    deliberately model-agnostic: it works with Transformers-style causal LM
+    outputs (tensor, ``.logits`` or ``{"logits": ...}``) while keeping all
+    model execution under inference mode on the caller's device.
+    """
+    if input_ids.ndim != 2 or input_ids.shape[0] == 0 or input_ids.shape[1] == 0:
+        raise ValueError("input_ids must be a non-empty [batch, tokens] tensor")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative")
+    if temperature < 0:
+        raise ValueError("temperature must be non-negative")
+    if eos_token_ids is None:
+        eos = set()
+    elif isinstance(eos_token_ids, int):
+        eos = {int(eos_token_ids)}
+    else:
+        eos = {int(value) for value in eos_token_ids}
+    was_training = model.training
+    model.eval()
+    try:
+        generated = input_ids.clone()
+        mask = attention_mask.clone() if attention_mask is not None else None
+        if mask is not None and tuple(mask.shape) != tuple(generated.shape):
+            raise ValueError("attention_mask must align with input_ids")
+        initial_width = generated.shape[1]
+        initial_mask = (
+            mask.to(dtype=torch.bool)
+            if mask is not None
+            else torch.ones_like(generated, dtype=torch.bool)
+        )
+        prompt_lengths = initial_mask.sum(dim=1).tolist()
+        logits_rows: list[list[list[float]]] = [[] for _ in range(generated.shape[0])]
+        first = _extract_logits(model(generated, **({"attention_mask": mask} if mask is not None else {})))
+        for row in range(generated.shape[0]):
+            length = int(prompt_lengths[row])
+            logits_rows[row].extend(first[row, :length].float().detach().cpu().tolist())
+        finished = torch.zeros(generated.shape[0], dtype=torch.bool, device=generated.device)
+        for _ in range(max_new_tokens):
+            last_logits = first[:, -1, :]
+            if temperature == 0:
+                next_tokens = last_logits.argmax(dim=-1)
+            else:
+                probabilities = torch.softmax(last_logits / float(temperature), dim=-1)
+                next_tokens = torch.multinomial(probabilities, num_samples=1).squeeze(-1)
+            if eos:
+                eos_mask = torch.zeros_like(next_tokens, dtype=torch.bool)
+                for token in eos:
+                    eos_mask |= next_tokens == token
+                finished |= eos_mask
+            generated = torch.cat((generated, next_tokens[:, None]), dim=1)
+            if mask is not None:
+                mask = torch.cat((mask, torch.ones_like(next_tokens[:, None], dtype=mask.dtype)), dim=1)
+            outputs = model(generated, **({"attention_mask": mask} if mask is not None else {}))
+            first = _extract_logits(outputs)
+            for row in range(generated.shape[0]):
+                logits_rows[row].append(first[row, -1].float().detach().cpu().tolist())
+            if stop_at_eos and eos and bool(finished.all()):
+                break
+        records: list[dict[str, Any]] = []
+        for row in range(generated.shape[0]):
+            prompt = generated[row, :initial_width][initial_mask[row]]
+            continuation = generated[row, initial_width:]
+            if stop_at_eos and eos:
+                eos_positions = [
+                    index for index, token in enumerate(continuation.tolist()) if int(token) in eos
+                ]
+                if eos_positions:
+                    continuation = continuation[: eos_positions[0] + 1]
+            token_ids = torch.cat((prompt, continuation)).detach().cpu().tolist()
+            records.append(
+                {
+                    "input_ids": token_ids,
+                    "teacher_logits": logits_rows[row][: len(token_ids)],
+                }
+            )
+        return records
+    finally:
+        if was_training:
+            model.train()
+
+
+def write_pearl_teacher_trace(path: str | Path, records: Iterable[Mapping[str, Any]]) -> int:
+    """Write teacher records as JSONL and return the number of rows written."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with destination.open("w", encoding="utf-8") as handle:
+        for record in records:
+            if "input_ids" not in record or "teacher_logits" not in record:
+                raise ValueError("Teacher records need input_ids and teacher_logits")
+            if len(record["input_ids"]) != len(record["teacher_logits"]):
+                raise ValueError("Teacher logits must align with input_ids")
+            handle.write(json.dumps(dict(record), ensure_ascii=True) + "\n")
+            count += 1
+    if count == 0:
+        raise ValueError("Cannot write an empty teacher trace")
+    return count
+
+
 @dataclass(frozen=True)
 class PearlDistillationConfig:
     """Numerical policy for one PEARL-2 distillation step."""
@@ -126,7 +253,9 @@ def collate_pearl_distillation_records(
     has_acceptance = any("acceptance_mask" in row for row in rows)
     for batch_index, (row, length) in enumerate(zip(rows, lengths)):
         input_tensor[batch_index, :length] = torch.tensor(row["input_ids"], dtype=torch.long, device=resolved_device)
-        teacher_tensor[batch_index, :length] = torch.tensor(row["teacher_logits"], dtype=torch.float32, device=resolved_device)
+        teacher_tensor[batch_index, :length] = torch.tensor(
+            row["teacher_logits"], dtype=torch.float32, device=resolved_device
+        )
         attention[batch_index, :length] = True
         if "labels" in row:
             values = row["labels"]
@@ -377,9 +506,11 @@ __all__ = [
     "PearlDistillationConfig",
     "PearlDistillationMetrics",
     "collate_pearl_distillation_records",
+    "collect_pearl_teacher_trace",
     "load_pearl_distillation_records",
     "load_pearl_distillation_checkpoint",
     "pearl_distillation_loss",
     "save_pearl_distillation_checkpoint",
     "train_pearl_distillation_step",
+    "write_pearl_teacher_trace",
 ]
