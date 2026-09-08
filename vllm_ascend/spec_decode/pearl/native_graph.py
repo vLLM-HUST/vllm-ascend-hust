@@ -88,6 +88,11 @@ _CAPTURED_TASKS: list[NativePagedAttentionGraphTask | NativeFusedInferAttentionG
 _CAPTURED_PA_WORKSPACES: dict[tuple[Any, ...], torch.Tensor] | None = None
 _CAPTURED_FIA_WORKSPACES: dict[tuple[Any, ...], torch.Tensor] | None = None
 
+# Match vLLM-Ascend's ordinary causal FIA path.  The explicit attention mask
+# carries the causal/tree structure; these bounds must stay unbounded so FIA
+# does not apply a second relative window to TND queries.
+_FIA_INT_MAX = 2147483647
+
 
 @contextmanager
 def _collect_graph_tasks():
@@ -222,7 +227,8 @@ def run_native_fused_infer_attention(
         "num_heads": num_heads,
         "scale": scale,
         "sparse_mode": 3,
-        "next_tokens": 0,
+        "pre_tokens": _FIA_INT_MAX,
+        "next_tokens": _FIA_INT_MAX,
     }
     if _CAPTURED_TASKS is None:
         torch_npu.npu_fused_infer_attention_score.out(

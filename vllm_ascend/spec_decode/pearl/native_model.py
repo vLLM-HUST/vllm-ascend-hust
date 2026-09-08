@@ -677,7 +677,9 @@ class NativeAttention(nn.Module):
                 if metadata.attention_mask.ndim != 2 or offset >= metadata.attention_mask.shape[0]:
                     raise ValueError("Tree attention mask rows must match packed query rows")
                 # PEARL tree masks use True=blocked, while SDPA uses True=keep.
-                visible = (~metadata.attention_mask[offset, :context_length]).view(1, 1, 1, -1)
+                visible = (~metadata.attention_mask[offset, :context_length].to(torch.bool)).view(
+                    1, 1, 1, -1
+                )
                 attention_mask = visible
             attended[offset] = (
                 F.scaled_dot_product_attention(
