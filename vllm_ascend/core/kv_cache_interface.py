@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 from typing_extensions import Self
@@ -17,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
@@ -55,25 +58,34 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def __post_init__(self):
         if self.compress_ratio < 1:
             raise ValueError(f"Ascend compression ratio must be positive, got {self.compress_ratio}")
-        if self.compress_ratio == 1 and self.tokens_per_state != 1:
-            if not isinstance(self.tokens_per_state, int):
+        if not vllm_version_is("0.28.0"):
+            if self.compress_ratio == 1 and self.tokens_per_state != 1:
+                if not isinstance(self.tokens_per_state, int):
+                    raise ValueError(
+                        "Ascend compressed MLA currently requires an integer "
+                        f"tokens_per_state, got {self.tokens_per_state}"
+                    )
+                object.__setattr__(self, "compress_ratio", self.tokens_per_state)
+            elif self.tokens_per_state == 1 and self.compress_ratio != 1:
+                object.__setattr__(self, "tokens_per_state", self.compress_ratio)
+            elif self.tokens_per_state != self.compress_ratio:
                 raise ValueError(
-                    f"Ascend compressed MLA currently requires an integer tokens_per_state, got {self.tokens_per_state}"
+                    "Ascend compress_ratio and the standardized tokens_per_state "
+                    f"must agree, got {self.compress_ratio} and "
+                    f"{self.tokens_per_state}"
                 )
-            object.__setattr__(self, "compress_ratio", self.tokens_per_state)
-        elif self.tokens_per_state == 1 and self.compress_ratio != 1:
-            object.__setattr__(self, "tokens_per_state", self.compress_ratio)
-        elif self.tokens_per_state != self.compress_ratio:
-            raise ValueError(
-                "Ascend compress_ratio and the standardized tokens_per_state "
-                f"must agree, got {self.compress_ratio} and "
-                f"{self.tokens_per_state}"
-            )
         super().__post_init__()
 
     @property
     def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels."""
+        """Return the physical block size consumed by Ascend kernels.
+
+        vLLM #51718 replaced ``MLAAttentionSpec.compress_ratio`` with
+        ``AttentionSpec.tokens_per_state`` on main. Both express how many
+        logical tokens one physical stored state covers.
+        """
+        if vllm_version_is("0.28.0"):
+            return self.block_size // self.compress_ratio
         return self.block_size // self.tokens_per_state
 
     @property
@@ -100,7 +112,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
-                spec.tokens_per_state,
+                spec.compress_ratio if vllm_version_is("0.28.0") else spec.tokens_per_state,
             )
             for spec in specs
         }
@@ -117,6 +129,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
         first_spec = specs[0]
         merged = super().merge(specs)
+        # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
+        # only carry it through on the legacy lane.
+        merged_kwargs: dict[str, Any] = {}
+        if vllm_version_is("0.28.0"):
+            merged_kwargs["indexes_kv_by_block_stride"] = first_spec.indexes_kv_by_block_stride
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
@@ -125,6 +142,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
             compress_ratio=compress_ratio_set.pop(),
+            **merged_kwargs,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
