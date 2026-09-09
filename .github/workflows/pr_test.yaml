@@ -29,6 +29,13 @@ on:
       - '*-dev'
       - 'releases/v*'
 
+# The HUST organization defaults workflow tokens to read-only. The selected
+# test reusable workflow reports test timing on the pull request, so callers
+# must explicitly grant the permission that the reusable workflow declares.
+permissions:
+  contents: read
+  pull-requests: write
+
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -802,4 +809,3 @@ jobs:
           fi
 
           echo "=== CI Gate: PASSED ==="
-
