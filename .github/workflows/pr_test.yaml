@@ -49,7 +49,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-aarch64-a2b3-pool
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -94,6 +94,37 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Validate upstream synchronization ancestry
+        if: ${{ contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/vllm-project/vllm-ascend.git \
+            main:refs/remotes/official/main
+          git merge-base --is-ancestor "${BASE_SHA}" "${HEAD_SHA}" || {
+            echo "::error::Upstream sync head does not contain its target base."
+            exit 1
+          }
+
+          valid_merge=""
+          while read -r merge_commit; do
+            [ -n "${merge_commit}" ] || continue
+            second_parent=$(git rev-parse "${merge_commit}^2")
+            if git merge-base --is-ancestor \
+              "${second_parent}" refs/remotes/official/main; then
+              valid_merge="${merge_commit}"
+              echo "Validated upstream merge ${merge_commit} (official parent ${second_parent})."
+              break
+            fi
+          done < <(git rev-list --first-parent --merges "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -z "${valid_merge}" ]; then
+            echo "::error::The upstream-sync label requires a merge commit whose second parent is reachable from official main."
+            exit 1
+          fi
 
       - name: Read verified vLLM refs
         id: vllm
@@ -258,7 +289,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"linux-aarch64-a2b3-pool","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
 
   recommend-tests:
@@ -693,11 +724,12 @@ jobs:
   ci-gate:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     if: ${{ !cancelled() }}
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: linux-aarch64-a2b3-pool
     steps:
       - name: Check all required jobs
         env:
           HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
+          HAS_UPSTREAM_SYNC_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
@@ -720,7 +752,7 @@ jobs:
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          echo "labels: upstream-sync=${HAS_UPSTREAM_SYNC_LABEL} main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
           fi
@@ -738,6 +770,11 @@ jobs:
           fi
 
           if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
+            if [ "${HAS_UPSTREAM_SYNC_LABEL}" = "true" ]; then
+              echo "::notice::Upstream source synchronization passed lint and the full CPU unit suite. This CPU-only gate does not qualify an image or production deployment; run the required NPU/graph acceptance separately before promotion."
+              echo "=== CI Gate: PASSED (upstream sync, CPU only) ==="
+              exit 0
+            fi
             # select-tests only runs under a run-enabling label
             # (ready-precise / ready-all / main2main). An unlabeled run
             # passes the gate when (and only when) the paths-filter in

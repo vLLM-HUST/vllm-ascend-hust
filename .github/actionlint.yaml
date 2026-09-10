@@ -1,6 +1,8 @@
 self-hosted-runner:
   # Labels of self-hosted runner in array of strings.
   labels:
+    # Native ARM GitHub-hosted runner label used by release workflows.
+    - ubuntu-24.04-arm
     - linux-arm64-npu-static-8
     - linux-aarch64-310p-1
     - linux-aarch64-310p-2
@@ -32,4 +34,5 @@ self-hosted-runner:
     - linux-aarch64-a2b3-2
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
+    - linux-aarch64-a2b3-pool
     - linux-aarch64-a2b1-8
