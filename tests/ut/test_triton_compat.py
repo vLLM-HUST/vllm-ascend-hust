@@ -14,6 +14,23 @@ compat = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compat)
 
 
+def test_triton_version_falls_back_to_ascend_distribution(monkeypatch: pytest.MonkeyPatch):
+    queried: list[str] = []
+
+    def distribution_version(name: str) -> str:
+        queried.append(name)
+        if name == "triton":
+            raise compat.importlib.metadata.PackageNotFoundError(name)
+        if name == "triton-ascend":
+            return "3.6.0+git836ac44e"
+        raise AssertionError(f"unexpected distribution lookup: {name}")
+
+    monkeypatch.setattr(compat.importlib.metadata, "version", distribution_version)
+
+    assert compat._triton_version() == compat.Version("3.6.0+git836ac44e")
+    assert queried == ["triton", "triton-ascend"]
+
+
 @pytest.fixture(autouse=True)
 def isolate_gluon_modules(monkeypatch: pytest.MonkeyPatch):
     original = {

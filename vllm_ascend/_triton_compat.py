@@ -10,13 +10,18 @@ from types import ModuleType
 from packaging.version import InvalidVersion, Version
 
 _REAL_GLUON_MIN_VERSION = Version("3.6")
+_TRITON_DISTRIBUTIONS = ("triton", "triton-ascend")
 
 
 def _triton_version() -> Version | None:
-    try:
-        return Version(importlib.metadata.version("triton"))
-    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
-        return None
+    for distribution in _TRITON_DISTRIBUTIONS:
+        try:
+            return Version(importlib.metadata.version(distribution))
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        except InvalidVersion:
+            return None
+    return None
 
 
 def _install_legacy_gluon_stubs() -> None:
