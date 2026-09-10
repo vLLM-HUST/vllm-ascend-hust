@@ -307,6 +307,7 @@ jobs:
         [{"partition_name":"cpu-ut","runner":"ubuntu-24.04","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
       use_public_indexes: true
+      skip_rebase: true
 
   recommend-tests:
     name: Recommend tests

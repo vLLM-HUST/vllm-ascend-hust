@@ -62,6 +62,11 @@ on:
         required: false
         default: false
         description: 'Use public package and OS indexes instead of the private CI cache.'
+      skip_rebase:
+        type: boolean
+        required: false
+        default: false
+        description: 'Verify base ancestry without flattening an upstream synchronization merge.'
       timeout-minutes:
         type: number
         required: false
@@ -154,6 +159,7 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
           FIXED_BASE_SHA: ${{ inputs.base_sha }}
+          SKIP_REBASE: ${{ inputs.skip_rebase }}
         run: |
           # Reproduce the snapshot used by the cache coordinator. Falling back
           # to FETCH_HEAD is only for callers that do not provide a fixed SHA.
@@ -165,10 +171,17 @@ jobs:
             BASE_SHA=$(git rev-parse FETCH_HEAD)
           fi
           git cat-file -e "${BASE_SHA}^{commit}"
-          git rebase "$BASE_SHA"
+          if [ "${SKIP_REBASE}" = "true" ]; then
+            git merge-base --is-ancestor "$BASE_SHA" HEAD || {
+              echo "::error::Test ref does not contain the requested base snapshot."
+              exit 1
+            }
+            echo "Verified base ancestry without rewriting the synchronization merge."
+          else
+            git rebase "$BASE_SHA"
+          fi
           git submodule sync --recursive
           git submodule update --init --recursive
-
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
