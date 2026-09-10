@@ -10,6 +10,8 @@ import torch
 spec = importlib.util.spec_from_file_location(
     "native_binding", Path(__file__).resolve().parents[3] / "vllm_ascend/patch/worker/patch_bind_kv_cache.py"
 )
+assert spec is not None, "unable to create native Mamba binding module spec"
+assert spec.loader is not None, "native Mamba binding module spec has no loader"
 binding = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(binding)
 
