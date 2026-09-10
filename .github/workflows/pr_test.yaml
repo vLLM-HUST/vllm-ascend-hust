@@ -49,7 +49,7 @@ concurrency:
 
 jobs:
   pre-commit:
-    runs-on: linux-aarch64-a2b3-pool
+    runs-on: ubuntu-24.04
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
@@ -218,10 +218,24 @@ jobs:
               - '.github/workflows/scripts/coverage.py'
 
       - name: Install vllm-ascend dev (conditional)
-        if: steps.filter.outputs.lint_tracker == 'true'
+        if: ${{ steps.filter.outputs.lint_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}
         env:
           UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu"
+          UV_INDEX_STRATEGY: unsafe-best-match
+          UV_NO_CACHE: 1
+          UV_SYSTEM_PYTHON: 1
+        run: |
+          pip install uv
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+
+      - name: Install vllm-ascend dev from public indexes (upstream sync)
+        if: ${{ steps.filter.outputs.lint_tracker == 'true' && contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}
+        env:
+          UV_INDEX_URL: https://pypi.org/simple
+          UV_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
           UV_INDEX_STRATEGY: unsafe-best-match
           UV_NO_CACHE: 1
           UV_SYSTEM_PYTHON: 1
@@ -289,8 +303,9 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"linux-aarch64-a2b3-pool","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"ubuntu-24.04","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
+      use_public_indexes: true
 
   recommend-tests:
     name: Recommend tests
@@ -724,7 +739,7 @@ jobs:
   ci-gate:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     if: ${{ !cancelled() }}
-    runs-on: linux-aarch64-a2b3-pool
+    runs-on: ubuntu-24.04
     steps:
       - name: Check all required jobs
         env:

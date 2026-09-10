@@ -57,6 +57,11 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      use_public_indexes:
+        type: boolean
+        required: false
+        default: false
+        description: 'Use public package and OS indexes instead of the private CI cache.'
       timeout-minutes:
         type: number
         required: false
@@ -96,8 +101,8 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_URL: ${{ inputs.use_public_indexes && 'https://pypi.org/simple' || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
+        UV_EXTRA_INDEX_URL: ${{ inputs.use_public_indexes && 'https://download.pytorch.org/whl/cpu' || 'https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/' }}
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
@@ -110,10 +115,16 @@ jobs:
           npu-smi info
 
       - name: Install packages
+        env:
+          USE_PUBLIC_INDEXES: ${{ inputs.use_public_indexes }}
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          if [ "${USE_PUBLIC_INDEXES}" != "true" ]; then
+            sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+            pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          else
+            pip config set global.index-url https://pypi.org/simple
+          fi
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"

@@ -34,5 +34,4 @@ self-hosted-runner:
     - linux-aarch64-a2b3-2
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
-    - linux-aarch64-a2b3-pool
     - linux-aarch64-a2b1-8
