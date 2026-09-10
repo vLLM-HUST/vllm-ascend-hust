@@ -102,6 +102,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --no-tags https://github.com/vllm-project/vllm-ascend.git \
             main:refs/remotes/official/main
           git merge-base --is-ancestor "${BASE_SHA}" "${HEAD_SHA}" || {
