@@ -289,8 +289,15 @@ jobs:
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          # The main branch can require an unreleased triton-ascend wheel.
+          # CPU tests run with backend autoload disabled and do not need that
+          # device package, so keep the rest of the dependency set resolvable.
+          sed '/^triton-ascend==/d' requirements.txt > /tmp/requirements-cpu.txt
+          cp requirements-lint.txt /tmp/requirements-lint.txt
+          sed 's@^-r requirements.txt$@-r /tmp/requirements-cpu.txt@' \
+            requirements-dev.txt > /tmp/requirements-dev-cpu.txt
+          uv pip install -r /tmp/requirements-dev-cpu.txt
+          uv pip install -e . --no-deps
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
