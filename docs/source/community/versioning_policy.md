@@ -83,6 +83,22 @@ resulting environment is resolver-compatible or that NPU runtime tests pass.
 Using `--no-build-isolation` can bypass build-environment resolution, so run
 `python -m pip check` before using such an environment for runtime testing.
 
+### HUST main synchronization provenance
+
+The rebuilt HUST fork tracks official `main` through explicit merge commits.
+For a synchronized HUST commit, use Git ancestry and the official second parent
+of its sync merge as the plugin upstream provenance. The sync pull request also
+records that full commit ID and verifies that it remains reachable from
+`vllm-project/vllm-ascend:main`.
+
+The rebuilt main line does **not** use the historical `upstream_version.json`
+file. Reintroducing that file with an old release number (for example, 0.19)
+would incorrectly describe a moving main snapshot as a release. Package
+versions are derived from reachable HUST tags and the source commit, while the
+compatible vLLM core is independently pinned by
+`.github/vllm-main-verified.commit`. Neither value should be inferred from the
+other.
+
 ## Release cadence
 
 ### Release window

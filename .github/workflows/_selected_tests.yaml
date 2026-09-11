@@ -57,6 +57,16 @@ on:
         required: false
         default: false
         description: 'Whether to run tests with coverage enabled.'
+      use_public_indexes:
+        type: boolean
+        required: false
+        default: false
+        description: 'Use public package and OS indexes instead of the private CI cache.'
+      skip_rebase:
+        type: boolean
+        required: false
+        default: false
+        description: 'Verify base ancestry without flattening an upstream synchronization merge.'
       timeout-minutes:
         type: number
         required: false
@@ -96,8 +106,8 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
         MAX_JOBS: 4
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_URL: ${{ inputs.use_public_indexes && 'https://pypi.org/simple' || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
+        UV_EXTRA_INDEX_URL: ${{ inputs.use_public_indexes && 'https://download.pytorch.org/whl/cpu' || 'https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/' }}
         UV_INDEX_STRATEGY: unsafe-best-match
         UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
         UV_HTTP_TIMEOUT: 120
@@ -110,10 +120,16 @@ jobs:
           npu-smi info
 
       - name: Install packages
+        env:
+          USE_PUBLIC_INDEXES: ${{ inputs.use_public_indexes }}
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          if [ "${USE_PUBLIC_INDEXES}" != "true" ]; then
+            sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+            pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          else
+            pip config set global.index-url https://pypi.org/simple
+          fi
           apt-get update -y
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -143,6 +159,7 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
           FIXED_BASE_SHA: ${{ inputs.base_sha }}
+          SKIP_REBASE: ${{ inputs.skip_rebase }}
         run: |
           # Reproduce the snapshot used by the cache coordinator. Falling back
           # to FETCH_HEAD is only for callers that do not provide a fixed SHA.
@@ -154,10 +171,17 @@ jobs:
             BASE_SHA=$(git rev-parse FETCH_HEAD)
           fi
           git cat-file -e "${BASE_SHA}^{commit}"
-          git rebase "$BASE_SHA"
+          if [ "${SKIP_REBASE}" = "true" ]; then
+            git merge-base --is-ancestor "$BASE_SHA" HEAD || {
+              echo "::error::Test ref does not contain the requested base snapshot."
+              exit 1
+            }
+            echo "Verified base ancestry without rewriting the synchronization merge."
+          else
+            git rebase "$BASE_SHA"
+          fi
           git submodule sync --recursive
           git submodule update --init --recursive
-
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -265,8 +289,15 @@ jobs:
           COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          # The main branch can require an unreleased triton-ascend wheel.
+          # CPU tests run with backend autoload disabled and do not need that
+          # device package, so keep the rest of the dependency set resolvable.
+          sed '/^triton-ascend==/d' requirements.txt > /tmp/requirements-cpu.txt
+          cp requirements-lint.txt /tmp/requirements-lint.txt
+          sed 's@^-r requirements.txt$@-r /tmp/requirements-cpu.txt@' \
+            requirements-dev.txt > /tmp/requirements-dev-cpu.txt
+          uv pip install -r /tmp/requirements-dev-cpu.txt
+          uv pip install -e . --no-deps --no-build-isolation
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}

@@ -35,7 +35,7 @@ def allocate_native_hybrid_cache(
         raise ValueError("Hybrid cache descriptors must share one backing allocation")
     blocks = config.num_blocks
     # Validate every descriptor before allocating device memory.
-    pools = {}
+    pools: dict[tuple[int, int], tuple[int, int, int]] = {}
     for tensor in config.kv_cache_tensors:
         for index, name in enumerate(tensor.layers):
             spec, kernel_size = specs[name]

@@ -6,6 +6,7 @@ import importlib
 import importlib.metadata
 import sys
 from types import ModuleType
+from typing import Any, cast
 
 from packaging.version import InvalidVersion, Version
 
@@ -39,8 +40,11 @@ def _install_legacy_gluon_stubs() -> None:
         language = ModuleType("triton.experimental.gluon.language")
         sys.modules["triton.experimental.gluon.language"] = language
 
-    experimental.gluon = gluon
-    gluon.language = language
+    # These are deliberately dynamic module attributes. The Any view mirrors
+    # import machinery without pretending that bare ModuleType statically
+    # declares ``gluon`` or ``language`` members.
+    cast(Any, experimental).gluon = gluon
+    cast(Any, gluon).language = language
 
 
 def ensure_gluon_compatibility() -> None:
