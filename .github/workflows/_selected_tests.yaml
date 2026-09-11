@@ -297,7 +297,7 @@ jobs:
           sed 's@^-r requirements.txt$@-r /tmp/requirements-cpu.txt@' \
             requirements-dev.txt > /tmp/requirements-dev-cpu.txt
           uv pip install -r /tmp/requirements-dev-cpu.txt
-          uv pip install -e . --no-deps
+          uv pip install -e . --no-deps --no-build-isolation
 
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
