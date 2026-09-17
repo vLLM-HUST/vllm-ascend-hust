@@ -32,7 +32,6 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
-    scatter_paged_cache,
     trans_rope_weight,
     transdata,
     wait_for_kv_layer_from_connector,
@@ -58,6 +57,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_sp,
+    is_mtp_layer,
     maybe_trans_nz,
 )
 
@@ -229,6 +229,9 @@ class SparseMLAMetadataState:
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
+
+# npu_transpose_batchmatmul rejects operand dimensions >= 65536
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 
 class PreprocessType(enum.Enum):
@@ -450,6 +453,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -503,6 +513,14 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # TODO(lzt): Pass the adaptive verification token count explicitly
+            # instead of deriving its padded shape from positions. Need fix.
+            num_input_tokens = common_attn_metadata.positions.shape[0]
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
@@ -541,17 +559,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             draft_index,
         )
 
-        if get_ascend_config().c8_reshape_optim_enabled:
-            torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
-                block_size,
-            )
-
         metadata = self.metadata_cls(  # type: ignore
-            num_input_tokens=common_attn_metadata.num_input_tokens,
+            num_input_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             cum_query_lens=cum_query_lens,
             seq_lens=seq_lens,
@@ -569,9 +578,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             **parallel_metadata,
         )
         if self.nope:
@@ -624,6 +630,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # A replicated MTP draft may inherit a PCP target's non-trivial interleave
+    # value. With DCP disabled it does not change the draft KV-cache layout.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -664,7 +674,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
         # Optional platform service injected by the model runner. Attention
         # stays independent of KVPP scheduling and the concrete transport.
@@ -691,6 +701,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or index_cache_enabled
+        self._is_mtp_layer = is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self.skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -738,6 +750,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @staticmethod
     def update_graph_params(
@@ -819,21 +845,32 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         self._quant_type = type(quant_method) if quant_method is not None else None
-        qt = self._quant_type
 
-        if self.is_kv_consumer and (
-            (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
-            or qt is AscendW8A8MXFP8DynamicLinearMethod
-            or qt is None
-        ):
-            if self._try_enable_type(PreprocessType.PROLOG_V3, act_dtype):
+        pp_type = self._fused_preprocess_type()
+        if pp_type is not None and self._try_enable_type(pp_type, act_dtype):
+            return pp_type
+        return PreprocessType.NATIVE
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Return the enabled fused preprocess type, or None if it cannot run."""
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
+
+        # PROLOG_V3 takes precedence over MLAPO.
+        if getattr(self, "dcp_group", None) is None:
+            eligible = self.is_kv_consumer and (
+                (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
+                or qt is AscendW8A8MXFP8DynamicLinearMethod
+                or qt is None
+            )
+            if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
                 return PreprocessType.PROLOG_V3
 
-        if qt is AscendW8A8LinearMethod and self.enable_mlapo:
-            if self._try_enable_type(PreprocessType.MLAPO, act_dtype):
-                return PreprocessType.MLAPO
+        eligible = qt is AscendW8A8LinearMethod and self.enable_mlapo
+        if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO):
+            return PreprocessType.MLAPO
 
-        return PreprocessType.NATIVE
+        return None
 
     def _try_enable_type(self, pp_type: PreprocessType, act_dtype: torch.dtype) -> bool:
         reasons = self._get_fused_type_unsupported_reasons(pp_type)
@@ -856,10 +893,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.fused_qkv_a_proj is None:
             reasons.append("fused_qkv_a_proj is None, mlapo is disabled.")
 
+        quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
+        qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
             if self.is_kv_producer:
                 reasons.append("PROLOG_V3 is disabled on KV producer workers.")
-            if self._quant_type is None and self.enable_sparse_sfa_c8:
+            if qt is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
             if getattr(self.q_proj, "_chunk_size", 0):
                 reasons.append("PROLOG_V3 does not support chunked q_proj weights yet.")
@@ -1040,7 +1079,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
             cache = kv_cache[0]
-            scatter_paged_cache(cache, slots[: values.shape[0]].long(), values.to(cache.dtype), cache.shape[1])
+            # The hybrid cache configuration keeps NoPE main KV pages packed.
+            torch_npu.npu_scatter_nd_update_(
+                cache.view(-1, self.kv_lora_rank),
+                slots[: values.shape[0]].view(-1, 1),
+                values.to(cache.dtype),
+            )
             return None, None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1086,12 +1130,30 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if (
+            q_nope.dtype in [torch.float16, torch.bfloat16]
+            and hasattr(torch_npu, "npu_transpose_batchmatmul")
+            and q_nope.shape[0] < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
+        ):
+            # Convert from (B, N, P) to (N, B, P) and multiply
+            # (N, B, P) x (N, P, L) -> (B, N, L)
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            # Fallback for torch_npu builds without the fused op, unsupported
+            # dtypes, or a token dim beyond the operand limit.
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
@@ -1466,7 +1528,7 @@ class AscendSFAImpl(MLAAttentionImpl):
           indexer ``(indexer_k_cache, indexer_scale_cache)``
           -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
 
-        Layers that reuse another layer's top-k indices have no local indexer;
+        Static shared-index layers have no runtime indexer cache;
         for those layers, the main cache tuple is returned unchanged.
         """
         # TODO: Remove this recomposition once SFA kernels accept split
@@ -1487,7 +1549,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # The indexer owns and consumes its own cache. No LightningIndexer
             # cache layout is imposed on this attention operator.
             return main_cache
-        if not self.has_indexer:
+        if not self.runtime_has_indexer:
             return main_cache
 
         # Sparse KV offload registers the main MLA cache as a 6-tuple
@@ -1517,29 +1579,29 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_indexer_attn_metadata(self) -> Any | None:
         """Fetch the indexer cache layer's own metadata, built by the indexer
-        backend's builder; ``None`` when this layer has no indexer."""
-        if not self.has_indexer:
+        backend's builder; ``None`` when this layer has no runtime indexer."""
+        if not self.runtime_has_indexer:
             return None
-        prefix = self.indexer.k_cache.prefix
+        own_prefix = self.indexer.k_cache.prefix
+        prefixes = [own_prefix]
         kv_sharing_target = getattr(self, "kv_sharing_target_layer_name", None)
         if kv_sharing_target is not None:
-            # A KV-sharing layer (e.g. an MTP draft layer) owns no cache of
-            # its own, so no metadata is built under its own prefix; resolve
-            # to the sharing target's indexer cache prefix instead.
+            # Prefer the sharing target's cache view, but keep the draft
+            # indexer's own independently built metadata as a valid fallback.
+            # Some proposers register the draft indexer as its own metadata
+            # dependency even when the physical cache is shared.
             target_base = kv_sharing_target.removesuffix(".attn")
-            prefix = f"{target_base}.indexer.k_cache"
+            prefixes = [f"{target_base}.indexer.k_cache", own_prefix]
         forward_metadata = get_forward_context().attn_metadata
-        indexer_metadata = forward_metadata.get(prefix) if isinstance(forward_metadata, dict) else None
-        if indexer_metadata is None and isinstance(forward_metadata, dict):
-            # During MTP draft propose the proposer only builds metadata for
-            # the draft attention layers (keyed by layer name), so fall back
-            # to this layer's SFA attention metadata - the same metadata the
-            # pre-refactor inline indexer consumed (slot_mapping/block_table
-            # are identical for both caches).
-            indexer_metadata = forward_metadata.get(self.layer_name)
+        indexer_metadata = None
+        if isinstance(forward_metadata, dict):
+            for prefix in prefixes:
+                indexer_metadata = forward_metadata.get(prefix)
+                if indexer_metadata is not None:
+                    break
         if indexer_metadata is None:
             raise RuntimeError(
-                f"No metadata was built for the indexer cache layer prefix={prefix}. layer_name={self.layer_name}."
+                f"No metadata was built for the indexer cache layer prefixes={prefixes}. layer_name={self.layer_name}."
             )
         return indexer_metadata
 
@@ -1601,7 +1663,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # Keep the raw hidden states for the indexer's k path: the fused
             # preprocess below returns new tensors and does not modify this
             # one in place.
-            k_hidden_states = hidden_states if self.has_indexer else None
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
                 # The fused preprocess is the first operation that may read or
@@ -1639,7 +1701,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             # The prepared hidden states feed the indexer's k path (same stage
             # as the weights path input).
-            k_hidden_states = hidden_states if self.has_indexer else None
+            k_hidden_states = hidden_states if self.runtime_has_indexer else None
 
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
@@ -1691,25 +1753,19 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
-        if self.has_indexer:
+        if self.runtime_has_indexer:
             # One unified indexer call: k path -> cache write -> top-k
             # selection (the selection kernel reads the freshly written
-            # cache). skip_topk layers still run the k path and the write
+            # cache). MTP skip_topk layers still run the k path and the write
             # (compute_topk=False) so their cache stays up to date, then
-            # reuse the shared top-k indices. The parallel-layout values the
-            # indexer needs ride on its own metadata: sequence lengths
-            # (sharded under DSA-CP) and the decode-token count the PCP
-            # cache-write gather splits on.
+            # reuse the shared top-k indices. Cache layout, RoPE, parallel
+            # sequence lengths, and decode count all come from the indexer's
+            # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
-            indexer_attn_metadata.actual_seq_lengths_query = parallel_context.actual_seq_lengths_query
-            indexer_attn_metadata.actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
-            indexer_attn_metadata.num_decode_tokens = attn_metadata.num_decode_tokens
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
-                cos,
-                sin,
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk,
@@ -1719,8 +1775,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             elif self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
         elif self.skip_topk:
-            # Layers sharing another layer's indexer (e.g. GLM-5.2 "shared"
-            # layers) own no indexer and only reuse the shared top-k indices.
+            # Static shared-index layers keep no runtime indexer cache and
+            # only reuse the shared top-k indices.
             topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
         else:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
