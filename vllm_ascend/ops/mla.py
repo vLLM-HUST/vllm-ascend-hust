@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
 class IndexerWrapper(nn.Module):
@@ -100,13 +101,11 @@ class IndexerWrapper(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
+        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -217,6 +216,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
+
+        # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
+        # layers, so quant methods must skip their own NZ conversion.
+        # Mark before VLLM calls process_weights_after_loading on submodules.
+        mark_fused_preprocess_weights(self.mla_attn.impl)
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 
