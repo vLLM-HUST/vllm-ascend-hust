@@ -339,6 +339,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.mock_vllm_config.cache_config.cache_dtype = "float16"
+
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
@@ -502,6 +504,7 @@ class TestAscendAttentionBackendImpl(TestBase):
             value_cache.untyped_storage().data_ptr(),
             physical.untyped_storage().data_ptr(),
         )
+
     def test_hnd_layout_is_recorded_during_initialization(self):
         with patch.object(attn_module.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "HND"):
             impl = AscendAttentionBackendImpl(

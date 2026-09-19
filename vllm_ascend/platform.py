@@ -476,8 +476,10 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
-        # 3.Auto detect quantization method
+        # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
+        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
+            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -1074,14 +1076,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
-
-        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
-            vllm_config.cache_config.cache_dtype,
-            str(model_config.dtype).replace("torch.", ""),
-        )
-
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
 
@@ -1531,9 +1525,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
+        # support DCP with a replicated indexer. Reject that combination early.
+        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
+        ):
             raise NotImplementedError(
-                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
+                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
 
 

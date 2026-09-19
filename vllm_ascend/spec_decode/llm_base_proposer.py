@@ -113,6 +113,17 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    arange: torch.Tensor
+
+    def _ensure_query_start_loc_arange_capacity(self) -> None:
+        """Ensure ``arange`` includes the terminal query boundary."""
+        required_size = max(self.max_batch_size, self.max_num_tokens) + 1
+        if self.arange.numel() < required_size:
+            self.arange = torch.arange(
+                required_size,
+                device=self.arange.device,
+                dtype=self.arange.dtype,
+            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
@@ -161,6 +172,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+        self._ensure_query_start_loc_arange_capacity()
 
         # Assign runner before it's used in the methods below
         self.runner = runner
@@ -279,9 +291,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._runnable = self._run_merged_draft
         if self.uses_mrope:
-            num_dims = 3 if vllm_version_is("0.28.0") else self.draft_model_config.mrope_num_dims
+            num_dims = 3 if vllm_version_is("0.29.0") else self.draft_model_config.mrope_num_dims
             self.mrope_positions = torch.zeros((num_dims, self.max_num_tokens + 1), dtype=torch.int32, device=device)
-        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+        elif vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
                 dtype=torch.int32,
@@ -1732,7 +1744,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
-            if vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            if vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
@@ -1851,16 +1863,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            if vllm_version_is("0.28.0"):
-                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
-            else:
-                return bool(
-                    {
-                        "DeepSeekMTPModel",
-                        "DeepseekV32MTPModel",
-                        "KimiK3MTPModel",
-                    }.intersection(architectures)
-                )
+            return bool(
+                {
+                    "DeepSeekMTPModel",
+                    "DeepseekV32MTPModel",
+                    "KimiK3MTPModel",
+                }.intersection(architectures)
+            )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(

@@ -379,6 +379,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_quant_method.apply.assert_called_once()
         self.mock_all_to_all_single.assert_not_called()
         self.assertEqual(logits.shape, (2, self.vocab_size))
+
     def test_get_logits_replicated_head_takes_normal_path(self):
         """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not
         join the lmhead_tp logits exchange even when lmhead_tp is enabled:

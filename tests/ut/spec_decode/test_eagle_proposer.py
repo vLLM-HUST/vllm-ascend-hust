@@ -414,10 +414,11 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
 
             expected_max_num_tokens = proposer.max_num_tokens
+            expected_arange_size = max(proposer.max_batch_size, expected_max_num_tokens) + 1
             self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
-            self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+            self.assertEqual(proposer.arange.shape, (expected_arange_size,))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -1512,7 +1513,7 @@ class TestEagleProposerPropose:
         assert isinstance(
             inspect.getattr_static(
                 vllm.config.ModelConfig,
-                "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims",
+                "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims",
             ),
             property
         )
@@ -2323,7 +2324,7 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
+        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims"
         for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):

@@ -26,8 +26,6 @@ from vllm_ascend.utils import vllm_version_is
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
-    if vllm_version_is("0.28.0"):
-        return kv_cache_spec.compress_ratio
     return kv_cache_spec.tokens_per_state
 
 
@@ -37,7 +35,7 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
         storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         # vLLM #53906 added an optional MLA storage-view override. It is not
         # Ascend's derived number of physical rows per logical block.
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
@@ -120,25 +118,23 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     def __post_init__(self):
         if self.compress_ratio < 1:
             raise ValueError(f"Ascend compression ratio must be positive, got {self.compress_ratio}")
-        if not vllm_version_is("0.28.0"):
-            if self.compress_ratio == 1 and self.tokens_per_state != 1:
-                if not isinstance(self.tokens_per_state, int):
-                    raise ValueError(
-                        "Ascend compressed MLA currently requires an integer "
-                        f"tokens_per_state, got {self.tokens_per_state}"
-                    )
-                object.__setattr__(self, "compress_ratio", self.tokens_per_state)
-            elif self.tokens_per_state == 1 and self.compress_ratio != 1:
-                object.__setattr__(self, "tokens_per_state", self.compress_ratio)
-            elif self.tokens_per_state != self.compress_ratio:
+        if self.compress_ratio == 1 and self.tokens_per_state != 1:
+            if not isinstance(self.tokens_per_state, int):
                 raise ValueError(
-                    "Ascend compress_ratio and the standardized tokens_per_state "
-                    f"must agree, got {self.compress_ratio} and "
-                    f"{self.tokens_per_state}"
+                    f"Ascend compressed MLA currently requires an integer tokens_per_state, got {self.tokens_per_state}"
                 )
+            object.__setattr__(self, "compress_ratio", self.tokens_per_state)
+        elif self.tokens_per_state == 1 and self.compress_ratio != 1:
+            object.__setattr__(self, "tokens_per_state", self.compress_ratio)
+        elif self.tokens_per_state != self.compress_ratio:
+            raise ValueError(
+                "Ascend compress_ratio and the standardized tokens_per_state "
+                f"must agree, got {self.compress_ratio} and "
+                f"{self.tokens_per_state}"
+            )
         super().__post_init__()
 
-    if vllm_version_is("0.28.0"):
+    if vllm_version_is("0.29.0"):
 
         @property
         def storage_block_size(self) -> int:
@@ -147,7 +143,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             On main, #53906 initializes a dataclass field with this name.
             A read-only property would reject that constructor assignment.
             """
-            return self.block_size // self.compress_ratio
+            return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
