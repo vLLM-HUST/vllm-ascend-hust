@@ -213,10 +213,12 @@ def write_rank_snapshot(
     request: ArmedHybridStateSnapshot,
     snapshot: CanonicalHybridStateSnapshot,
     logits: bytes,
+    state_lease_generation: int,
 ) -> dict[str, object]:
     """Create one rank's immutable artifacts and return rehashable receipts."""
 
     _require(bool(logits) and len(logits) % 4 == 0, "hybrid snapshot logits are invalid")
+    _require(state_lease_generation > 0, "state lease generation is invalid")
     payloads = {
         "logits": logits,
         "recurrent": snapshot.recurrent,
@@ -248,8 +250,9 @@ def write_rank_snapshot(
             path.unlink(missing_ok=True)
         raise
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "request_id": request.request_id,
+        "state_lease_generation": state_lease_generation,
         "checkpoint_id": request.checkpoint_id,
         "rank": request.rank,
         "context_tokens": request.expected_context_tokens,

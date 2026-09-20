@@ -4171,6 +4171,9 @@ class NPUModelRunner(GPUModelRunner):
                 block_tables,
                 actual_context,
             )
+            req_state = self.requests.get(request_id)
+            if req_state is None or req_state.state_lease_generation <= 0:
+                raise ValueError("hybrid snapshot has no scheduler state lease")
             logits_bytes = (
                 logits[req_index]
                 .detach()
@@ -4181,7 +4184,12 @@ class NPUModelRunner(GPUModelRunner):
                 .astype("<f4", copy=False)
                 .tobytes()
             )
-            receipt = write_rank_snapshot(request, state, logits_bytes)
+            receipt = write_rank_snapshot(
+                request,
+                state,
+                logits_bytes,
+                req_state.state_lease_generation,
+            )
             self._hybrid_snapshot_receipts[request.checkpoint_id] = receipt
             completed.append(request_id)
         for request_id in completed:
