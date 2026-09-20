@@ -1062,6 +1062,28 @@ class NPUWorker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def arm_hybrid_state_snapshot(
+        self,
+        request_id: str,
+        checkpoint_id: str,
+        expected_context_tokens: int,
+        output_directory: str,
+    ) -> None:
+        """Arm a default-off canonical state capture on this worker rank."""
+
+        self.model_runner.arm_hybrid_state_snapshot(
+            request_id,
+            checkpoint_id,
+            expected_context_tokens,
+            output_directory,
+            self.rank,
+        )
+
+    def get_hybrid_state_snapshot_receipt(
+        self, checkpoint_id: str
+    ) -> dict[str, object] | None:
+        return self.model_runner.get_hybrid_state_snapshot_receipt(checkpoint_id)
+
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
         """

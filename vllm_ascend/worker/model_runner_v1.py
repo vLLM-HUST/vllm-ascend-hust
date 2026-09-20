@@ -66,6 +66,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -162,6 +163,13 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker.hybrid_state_snapshot import (
+    ArmedHybridStateSnapshot,
+    HybridStateLayerSource,
+    capture_canonical_hybrid_state,
+    validate_capture_request,
+    write_rank_snapshot,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -182,6 +190,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
     from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -591,6 +600,11 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
+        # Explicitly armed, default-off evidence capture.  No normal serving
+        # request enters the D2H snapshot path.
+        self._hybrid_snapshot_kv_caches: dict[str, Any] | None = None
+        self._hybrid_snapshot_pending: dict[str, ArmedHybridStateSnapshot] = {}
+        self._hybrid_snapshot_receipts: dict[str, dict[str, object]] = {}
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
@@ -2436,6 +2450,11 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
 
+            self._capture_armed_hybrid_state_snapshots(
+                logits,
+                num_scheduled_tokens_np,
+            )
+
         # Now the batch has been launched we can wait for corrections from the
         # previous model forward without breaking async scheduling.
         if deferred_state_corrections_fn:
@@ -3960,6 +3979,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        self._hybrid_snapshot_kv_caches = kv_caches
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -3996,6 +4016,152 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         return kv_caches
+
+    def arm_hybrid_state_snapshot(
+        self,
+        request_id: str,
+        checkpoint_id: str,
+        expected_context_tokens: int,
+        output_directory: str,
+        rank: int,
+    ) -> None:
+        """Arm one fail-closed post-forward snapshot for a controlled run."""
+
+        if get_pp_group().world_size != 1:
+            raise ValueError("hybrid snapshot does not support pipeline parallelism")
+        if self.speculative_config is not None:
+            raise ValueError("hybrid snapshot does not support speculative decoding")
+        if self.pcp_size != 1 or self.dcp_size != 1:
+            raise ValueError("hybrid snapshot does not support context parallelism")
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError("hybrid snapshot requires mamba_cache_mode=none")
+        request = validate_capture_request(
+            request_id,
+            checkpoint_id,
+            expected_context_tokens,
+            output_directory,
+            rank,
+        )
+        if request_id in self._hybrid_snapshot_pending:
+            raise ValueError("hybrid snapshot request is already armed")
+        if checkpoint_id in self._hybrid_snapshot_receipts:
+            raise ValueError("hybrid snapshot checkpoint already completed")
+        self._hybrid_snapshot_pending[request_id] = request
+
+    def get_hybrid_state_snapshot_receipt(
+        self, checkpoint_id: str
+    ) -> dict[str, object] | None:
+        return self._hybrid_snapshot_receipts.get(checkpoint_id)
+
+    def _hybrid_snapshot_sources(self) -> list[HybridStateLayerSource]:
+        if self._hybrid_snapshot_kv_caches is None:
+            raise ValueError("hybrid snapshot cache tensors are not initialized")
+        layer_specs = self._get_layer_kv_cache_specs(self.kv_cache_config)
+        group_by_layer = {
+            layer_name: group_index
+            for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            for layer_name in group.layer_names
+            if layer_name not in self.runner_only_attn_layers
+        }
+        expected_names = set(group_by_layer)
+        ordered_names = [
+            name
+            for name in self.compilation_config.static_forward_context
+            if name in expected_names
+        ]
+        if set(ordered_names) != expected_names:
+            raise ValueError("hybrid snapshot cannot recover canonical model layer order")
+
+        sources: list[HybridStateLayerSource] = []
+        for ordinal, layer_name in enumerate(ordered_names):
+            cache_spec = layer_specs[layer_name]
+            cache = self._hybrid_snapshot_kv_caches.get(layer_name)
+            if isinstance(cache_spec, MambaSpec):
+                if not isinstance(cache, list) or len(cache) != 2:
+                    raise ValueError("hybrid snapshot recurrent cache layout is unsupported")
+                kind = "recurrent"
+                tensors = tuple(cache)
+            elif isinstance(cache_spec, FullAttentionSpec):
+                if not isinstance(cache, tuple) or len(cache) != 2:
+                    raise ValueError("hybrid snapshot attention cache layout is unsupported")
+                kind = "attention"
+                tensors = cache
+            else:
+                raise ValueError("hybrid snapshot cache spec is unsupported")
+            if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+                raise ValueError("hybrid snapshot cache contains a non-tensor")
+            sources.append(
+                HybridStateLayerSource(
+                    name=layer_name,
+                    ordinal=ordinal,
+                    kind=kind,
+                    group_index=group_by_layer[layer_name],
+                    block_size=cache_spec.block_size,
+                    tensors=tensors,
+                )
+            )
+        return sources
+
+    def _capture_armed_hybrid_state_snapshots(
+        self,
+        logits: torch.Tensor,
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        if not self._hybrid_snapshot_pending:
+            return
+        if logits.ndim != 2 or logits.shape[0] != self.input_batch.num_reqs:
+            raise ValueError("hybrid snapshot logits do not map one-to-one to requests")
+        sources = self._hybrid_snapshot_sources()
+        completed: list[str] = []
+        for request_id, request in self._hybrid_snapshot_pending.items():
+            req_index = self.input_batch.req_id_to_index.get(request_id)
+            if req_index is None:
+                continue
+            actual_context = int(self.input_batch.num_computed_tokens_cpu[req_index]) + int(
+                num_scheduled_tokens[req_index]
+            )
+            if actual_context < request.expected_context_tokens:
+                continue
+            if actual_context != request.expected_context_tokens:
+                raise ValueError("hybrid snapshot missed its expected context")
+
+            block_tables: dict[int, tuple[int, ...]] = {}
+            for group_index, group in enumerate(self.kv_cache_config.kv_cache_groups):
+                table = self.input_batch.block_table[group_index]
+                if table.use_hybrid_blocks:
+                    raise ValueError("hybrid snapshot does not support virtual block splitting")
+                count = int(table.num_blocks_per_row[req_index])
+                blocks = tuple(
+                    int(item)
+                    for item in table.get_numpy_array()[req_index, :count]
+                )
+                group_spec = group.kv_cache_spec
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    group_spec = next(iter(group_spec.kv_cache_specs.values()))
+                if isinstance(group_spec, MambaSpec) and len(blocks) != 1:
+                    raise ValueError("hybrid snapshot recurrent block extent is unsupported")
+                block_tables[group_index] = blocks
+
+            state = capture_canonical_hybrid_state(
+                sources,
+                block_tables,
+                actual_context,
+            )
+            logits_bytes = (
+                logits[req_index]
+                .detach()
+                .to(dtype=torch.float32)
+                .contiguous()
+                .cpu()
+                .numpy()
+                .astype("<f4", copy=False)
+                .tobytes()
+            )
+            receipt = write_rank_snapshot(request, state, logits_bytes)
+            self._hybrid_snapshot_receipts[request.checkpoint_id] = receipt
+            completed.append(request_id)
+        for request_id in completed:
+            del self._hybrid_snapshot_pending[request_id]
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         layer_kv_cache_spec: dict[str, KVCacheSpec] = {}
