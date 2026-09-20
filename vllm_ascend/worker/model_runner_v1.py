@@ -172,6 +172,10 @@ from vllm_ascend.worker.hybrid_state_snapshot import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.stateaxis_fork_failure import (
+    FailurePhase,
+    StateAxisForkFailureInjector,
+)
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -605,6 +609,9 @@ class NPUModelRunner(GPUModelRunner):
         self._hybrid_snapshot_kv_caches: dict[str, Any] | None = None
         self._hybrid_snapshot_pending: dict[str, ArmedHybridStateSnapshot] = {}
         self._hybrid_snapshot_receipts: dict[str, dict[str, object]] = {}
+        # Explicitly armed, one-shot experiment failure. Normal serving has no
+        # environment switch and never enters this path.
+        self._stateaxis_fork_failure = StateAxisForkFailureInjector()
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
@@ -2323,6 +2330,9 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
+        self._maybe_inject_stateaxis_fork_failure(
+            "before-forward", scheduler_output
+        )
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -2376,6 +2386,7 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+        self._maybe_inject_stateaxis_fork_failure("after-forward", scheduler_output)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2624,6 +2635,7 @@ class NPUModelRunner(GPUModelRunner):
             if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
+        self._maybe_inject_stateaxis_fork_failure("after-sample", scheduler_output)
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
@@ -4047,6 +4059,18 @@ class NPUModelRunner(GPUModelRunner):
         if checkpoint_id in self._hybrid_snapshot_receipts:
             raise ValueError("hybrid snapshot checkpoint already completed")
         self._hybrid_snapshot_pending[request_id] = request
+
+    def arm_stateaxis_fork_failure(self, request_id: str, stage: str) -> None:
+        """Arm one request-scoped, one-shot worker failure diagnostic."""
+
+        self._stateaxis_fork_failure.arm(request_id, stage)
+
+    def _maybe_inject_stateaxis_fork_failure(
+        self, phase: FailurePhase, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        self._stateaxis_fork_failure.maybe_fail(
+            phase, scheduler_output.num_scheduled_tokens.keys()
+        )
 
     def get_hybrid_state_snapshot_receipt(
         self, checkpoint_id: str
