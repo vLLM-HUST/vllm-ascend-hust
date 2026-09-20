@@ -126,8 +126,10 @@ def test_rank_writer_is_create_exclusive_and_returns_rehashable_receipts(tmp_pat
         recurrent_layers=("layers.0.linear_attn",),
         attention_layers=("layers.1.self_attn",),
     )
-    receipt = snapshot.write_rank_snapshot(request, state, b"\x00" * 8)
+    receipt = snapshot.write_rank_snapshot(request, state, b"\x00" * 8, 7)
 
+    assert receipt["schema_version"] == 2
+    assert receipt["state_lease_generation"] == 7
     assert receipt["layer_order"] == {
         "recurrent": ["layers.0.linear_attn"],
         "attention": ["layers.1.self_attn"],
@@ -138,7 +140,7 @@ def test_rank_writer_is_create_exclusive_and_returns_rehashable_receipts(tmp_pat
         assert hashlib.sha256(payload).hexdigest() == artifact["sha256"]
 
     with pytest.raises(FileExistsError):
-        snapshot.write_rank_snapshot(request, state, b"\x00" * 8)
+        snapshot.write_rank_snapshot(request, state, b"\x00" * 8, 7)
 
 
 def test_rank_writer_removes_only_new_partial_files(tmp_path: Path) -> None:
@@ -153,8 +155,22 @@ def test_rank_writer_removes_only_new_partial_files(tmp_path: Path) -> None:
     )
 
     with pytest.raises(FileExistsError):
-        snapshot.write_rank_snapshot(request, state, b"\x00" * 4)
+        snapshot.write_rank_snapshot(request, state, b"\x00" * 4, 7)
 
     assert recurrent_path.read_bytes() == b"preexisting"
     assert not (tmp_path / "partial.rank0.logits.f32le").exists()
     assert not (tmp_path / "partial.rank0.kv.bin").exists()
+
+
+def test_rank_writer_rejects_unassigned_state_lease(tmp_path: Path) -> None:
+    request = snapshot.ArmedHybridStateSnapshot("request", "lease", 1, tmp_path, 0)
+    state = snapshot.CanonicalHybridStateSnapshot(
+        recurrent=b"recurrent",
+        kv=b"kv",
+        recurrent_layers=("gdn",),
+        attention_layers=("attn",),
+    )
+
+    with pytest.raises(ValueError, match="state lease generation is invalid"):
+        snapshot.write_rank_snapshot(request, state, b"\x00" * 4, 0)
+    assert not list(tmp_path.iterdir())
