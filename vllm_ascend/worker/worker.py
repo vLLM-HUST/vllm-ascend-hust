@@ -78,6 +78,12 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.stateaxis_fork_failure import (
+    failure_arm_receipt,
+    validate_failure_arm,
+    validate_failure_topology,
+    validate_target_rank,
+)
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -1083,6 +1089,34 @@ class NPUWorker(WorkerBase):
         self, checkpoint_id: str
     ) -> dict[str, object] | None:
         return self.model_runner.get_hybrid_state_snapshot_receipt(checkpoint_id)
+
+    def arm_stateaxis_fork_failure(
+        self, request_id: str, stage: str, target_rank: int
+    ) -> dict[str, object]:
+        """Arm one TP4 rank at a bounded inherited-fork execution boundary."""
+
+        parallel = self.parallel_config
+        validate_failure_topology(
+            tensor_parallel_size=parallel.tensor_parallel_size,
+            world_size=parallel.world_size,
+            pipeline_parallel_size=parallel.pipeline_parallel_size,
+            data_parallel_size=parallel.data_parallel_size,
+            prefill_context_parallel_size=parallel.prefill_context_parallel_size,
+            decode_context_parallel_size=parallel.decode_context_parallel_size,
+            speculative=self.vllm_config.speculative_config is not None,
+        )
+        validate_target_rank(target_rank)
+        validate_failure_arm(request_id, stage)
+        armed = self.rank == target_rank
+        if armed:
+            self.model_runner.arm_stateaxis_fork_failure(request_id, stage)
+        return failure_arm_receipt(
+            rank=self.rank,
+            target_rank=target_rank,
+            request_id=request_id,
+            stage=stage,
+            armed=armed,
+        )
 
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
