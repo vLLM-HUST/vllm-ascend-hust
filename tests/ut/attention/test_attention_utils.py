@@ -17,7 +17,11 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm_ascend.attention.utils import filter_chunked_req_indices, get_or_register_attention_buffer
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    filter_chunked_req_indices,
+    get_or_register_attention_buffer,
+)
 
 
 def test_get_or_register_attention_buffer() -> None:
@@ -68,3 +72,28 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_common_metadata_keeps_removed_vllm_compatibility_slots() -> None:
+    legacy_seq_lens = torch.tensor([1], dtype=torch.int32)
+    legacy_num_computed = torch.tensor([0], dtype=torch.int32)
+    legacy_dcp_seq_lens = torch.tensor([1], dtype=torch.int32)
+
+    metadata = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=1,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int64),
+        _seq_lens_cpu=legacy_seq_lens,
+        _num_computed_tokens_cpu=legacy_num_computed,
+        dcp_local_seq_lens_cpu=legacy_dcp_seq_lens,
+    )
+
+    assert metadata._seq_lens_cpu is legacy_seq_lens
+    assert metadata._num_computed_tokens_cpu is legacy_num_computed
+    assert metadata.dcp_local_seq_lens_cpu is legacy_dcp_seq_lens
