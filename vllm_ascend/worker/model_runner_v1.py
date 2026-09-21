@@ -360,6 +360,11 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        # Newer vLLM normalizes legacy ``xdrope_section`` metadata into its
+        # mRoPE path and no longer initializes this compatibility attribute.
+        # Keep the old Ascend branches inert when paired with that host API.
+        self.uses_xdrope_dim = getattr(self, "uses_xdrope_dim", 0)
+
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
         self.pin_memory = PIN_MEMORY

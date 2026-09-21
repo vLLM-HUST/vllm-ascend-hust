@@ -285,6 +285,12 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     For many of the tensors we keep both NPU and CPU versions.
     """
 
+    # Compatibility slots retained by Ascend speculative-decode and attention
+    # backends after newer vLLM hosts removed the deprecated parent fields.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None

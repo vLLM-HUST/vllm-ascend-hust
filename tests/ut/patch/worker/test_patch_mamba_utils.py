@@ -6,11 +6,17 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.patch.worker.patch_mamba_utils import (
+    GPUInputBatch,
     _do_mamba_copy_block_npu,
     preprocess_mamba,
 )
+
+
+def test_mamba_patch_uses_canonical_input_batch() -> None:
+    assert GPUInputBatch is InputBatch
 
 
 def test_preprocess_stages_metadata_but_defers_state_copy():
