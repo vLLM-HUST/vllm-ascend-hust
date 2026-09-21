@@ -1,21 +1,28 @@
 """Compatibility wrapper for vLLM's KV-cache binding transition.
 
 Current vLLM provides ``AttentionLayerBase.bind_kv_cache`` and its core
-``bind_kv_cache`` helper handles standardized strided cache views. Older
-vLLM-Ascend releases replaced that helper because the layer method used to be
-abstract. Keeping the replacement on current core drops cache-group metadata
-and bypasses the layer-specific binding contract, so this module intentionally
-does not monkey-patch the upstream helper anymore. The exported wrapper remains
-for the v2 adaptor, which imports it as an explicit dependency.
+``bind_kv_cache`` helper handles standardized strided cache views. v0.29 still
+needs the legacy Ascend binder because the layer method was abstract there.
+The exported wrapper also remains for the v2 adaptor, which imports it as an
+explicit dependency.
 """
 
+from collections import defaultdict
 from collections.abc import Sequence
 
 import torch
+import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-from vllm.v1.worker.utils import bind_kv_cache as _core_bind_kv_cache
+from vllm.v1.worker.utils import (
+    bind_kv_cache as _core_bind_kv_cache,
+)
+from vllm.v1.worker.utils import (
+    extract_layer_index,
+)
+
+from vllm_ascend.utils import vllm_version_is
 
 _core_bind_mamba_cache = MambaBase.bind_kv_cache
 
@@ -43,7 +50,8 @@ def bind_mamba_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) ->
     self.kv_cache = kv_cache
 
 
-MambaBase.bind_kv_cache = bind_mamba_cache
+if not vllm_version_is("0.29.0"):
+    MambaBase.bind_kv_cache = bind_mamba_cache
 
 
 def bind_kv_cache(
@@ -53,11 +61,42 @@ def bind_kv_cache(
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
-    """Delegate to the current core binding contract without replacing it."""
-    _core_bind_kv_cache(
-        kv_caches,
-        forward_context,
-        runner_kv_caches,
-        num_attn_module,
-        kv_cache_groups,
-    )
+    """
+    Bind caches through the API implemented by the installed vLLM line.
+
+    v0.29 still needs Ascend's legacy binder. Current core understands
+    standardized strided views and layer-specific binding, so replacing it
+    there would discard cache-group metadata.
+    """
+    if not vllm_version_is("0.29.0"):
+        _core_bind_kv_cache(
+            kv_caches,
+            forward_context,
+            runner_kv_caches,
+            num_attn_module,
+            kv_cache_groups,
+        )
+        return
+
+    # Bind kv_caches to ModelRunner
+    assert len(runner_kv_caches) == 0
+
+    # Convert kv_caches dict to a list of tensors in the order of layer_index.
+    index2name = defaultdict(list)
+    for layer_name in kv_caches:
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
+
+    for layer_index in sorted(index2name.keys()):
+        layer_names = index2name[layer_index]
+        # remove some codes for the typical case of encoder-decoder model, e.g., bart.
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
+
+    # Bind kv_caches to forward context
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+    # v0.29.0 predates ReplaySSM ring trackers.
+
+
+if vllm_version_is("0.29.0"):
+    utils.bind_kv_cache = bind_kv_cache

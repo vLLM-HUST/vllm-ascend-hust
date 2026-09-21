@@ -72,3 +72,9 @@ def test_modern_triton_import_failure_is_not_hidden(monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ImportError, match="broken modern Gluon"):
         compat.ensure_gluon_compatibility()
+
+
+def test_missing_triton_version_metadata_uses_legacy_compat(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(compat.importlib.metadata, "version", lambda _name: None)
+
+    assert compat._triton_version() is None

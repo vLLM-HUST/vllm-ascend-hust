@@ -15,7 +15,10 @@ _REAL_GLUON_MIN_VERSION = Version("3.6")
 
 def _triton_version() -> Version | None:
     try:
-        return Version(importlib.metadata.version("triton"))
+        version = importlib.metadata.version("triton")
+        if not isinstance(version, str):
+            return None
+        return Version(version)
     except (importlib.metadata.PackageNotFoundError, InvalidVersion):
         return None
 
