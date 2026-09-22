@@ -148,7 +148,8 @@ def test_host_classifies_only_cached_multi_token_prefill(
 
 
 def test_provider_receives_paged_int8_contract_and_owns_output():
-    provider = RecordingProvider(C8ContinuingPrefillResult(workspace=(torch.ones(1),)))
+    workspace = (torch.ones(1),)
+    provider = RecordingProvider(C8ContinuingPrefillResult(workspace=workspace))
     impl = make_impl(provider)
     output = torch.zeros((2, 2, 32))
 
@@ -166,7 +167,7 @@ def test_provider_receives_paged_int8_contract_and_owns_output():
     assert torch.all(request.key_antiquant_offset == 2)
     assert torch.all(request.value_antiquant_offset == -3)
     assert request.output.data_ptr() == output.data_ptr()
-    assert impl._c8_continuing_prefill_eager_workspace == provider.result.workspace
+    assert impl._c8_continuing_prefill_eager_workspace == workspace
 
 
 def test_provider_ineligible_uses_host_fallback_without_execution():
