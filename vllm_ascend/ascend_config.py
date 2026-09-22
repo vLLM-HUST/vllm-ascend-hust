@@ -367,6 +367,7 @@ class AscendConfig:
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "c8_enable_reshape_optim": true,
+            "c8_continuing_prefill_provider": null,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -552,6 +553,9 @@ class AscendConfig:
     enable_sparse_li_c8: bool = False
     # See https://github.com/vllm-project/vllm-ascend/issues/15896
     c8_enable_reshape_optim: bool = True
+    # Optional ``module:factory`` path for a generic paged-C8
+    # continuing-prefill provider. None preserves the built-in dense fallback.
+    c8_continuing_prefill_provider: str | None = None
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1

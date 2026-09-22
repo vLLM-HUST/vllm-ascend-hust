@@ -557,6 +557,20 @@ class TestAscendC8KVCacheAttentionMethod(TestBase):
         self.assertEqual(layer.k_cache_scale.data.shape[0], 8)
         self.assertEqual(layer.v_cache_offset.data.dim(), 1)
 
+    def test_process_weights_configures_provider_before_runtime(self):
+        method = self._make_method()
+        layer = nn.Module()
+        layer.layer_name = "model.layers.0.self_attn.attn"
+        layer.impl = MagicMock()
+        layer.k_cache_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+        layer.k_cache_offset = nn.Parameter(torch.zeros(1), requires_grad=False)
+        layer.v_cache_scale = nn.Parameter(torch.ones(1), requires_grad=False)
+        layer.v_cache_offset = nn.Parameter(torch.zeros(1), requires_grad=False)
+
+        method.process_weights_after_loading(layer)
+
+        layer.impl.configure_c8_continuing_prefill_provider.assert_called_once_with(layer.layer_name)
+
     def test_apply_raises_runtime_error(self):
         method = self._make_method()
         layer = MagicMock()
