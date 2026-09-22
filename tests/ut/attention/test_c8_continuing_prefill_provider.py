@@ -229,6 +229,45 @@ def test_cached_prefill_provider_bypasses_dense_materialization():
     impl._dequant_paged_kv_to_dense.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("provider_enabled", "query_length", "kv_length"),
+    [
+        (False, 2, 34),
+        (True, 2, 2),
+        (True, 1, 33),
+    ],
+)
+def test_chunked_fallback_does_not_offer_ineligible_work_to_provider(provider_enabled, query_length, kv_length):
+    provider = RecordingProvider() if provider_enabled else None
+    impl = make_impl(provider)
+    impl._build_c8_continuing_prefill_request = MagicMock(side_effect=AssertionError("unexpected provider request"))
+    impl._dequant_paged_kv_to_dense = MagicMock(
+        return_value=(torch.zeros((kv_length, 1, 32)), torch.zeros((kv_length, 1, 32)))
+    )
+    metadata = make_metadata()
+    metadata.actual_seq_lengths_q = [query_length]
+    metadata.seq_lens_list = [kv_length]
+    query = torch.zeros((query_length, 2, 32))
+    output = torch.zeros_like(query)
+
+    with (
+        patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", SimpleNamespace(capturing=False)),
+        patch(
+            "vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score",
+            return_value=(torch.ones_like(query), None),
+        ),
+    ):
+        result = impl._forward_c8_chunked_prefill(query, None, None, metadata, output, make_layer())
+
+    assert result is output
+    assert torch.count_nonzero(output != 1) == 0
+    impl._build_c8_continuing_prefill_request.assert_not_called()
+    impl._dequant_paged_kv_to_dense.assert_called_once()
+    if provider is not None:
+        assert provider.eligibility_requests == []
+        assert provider.requests == []
+
+
 def test_prefill_cache_hit_provider_bypasses_fused_dense_fallback():
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
 

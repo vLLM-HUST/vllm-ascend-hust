@@ -1819,10 +1819,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
                 prefill_bt = attn_metadata.block_tables[num_decodes:]
                 prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
-                if provider_request is None:
-                    provider_request = self._build_c8_continuing_prefill_request(query, attn_metadata, output, layer)
-                if provider_output_ready or self._try_c8_continuing_prefill_provider(provider_request):
+                if provider_output_ready:
                     return output
+                if getattr(
+                    self, "_c8_continuing_prefill_provider", None
+                ) is not None and self._has_cached_multi_token_prefill(attn_metadata):
+                    if provider_request is None:
+                        provider_request = self._build_c8_continuing_prefill_request(
+                            query, attn_metadata, output, layer
+                        )
+                    if self._try_c8_continuing_prefill_provider(provider_request):
+                        return output
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
                     paged_k, paged_v, prefill_bt, prefill_sl, query.dtype, layer
                 )
