@@ -1459,6 +1459,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             block_table=attn_metadata.block_tables[num_decodes:],
             key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
             value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+            key_antiquant_offset=layer._c8_k_offset,
+            value_antiquant_offset=layer._c8_v_offset,
             output=output[num_decode_tokens:num_tokens],
             attention_mask=attn_metadata.attn_mask,
             actual_seq_lengths_q=tuple(int(length) for length in prefill_seq_qlen),

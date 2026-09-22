@@ -63,6 +63,8 @@ def make_layer():
     return SimpleNamespace(
         _c8_k_aq_scale_nz_bnsd=torch.ones((1, 1, 32)),
         _c8_v_aq_scale_nz_bnsd=torch.ones((1, 1, 32)),
+        _c8_k_offset=torch.full((1, 1, 32), 2.0),
+        _c8_v_offset=torch.full((1, 1, 32), -3.0),
     )
 
 
@@ -161,6 +163,8 @@ def test_provider_receives_paged_int8_contract_and_owns_output():
     assert request.block_table.tolist() == [[0, 1]]
     assert request.actual_seq_lengths_q == (2,)
     assert request.actual_seq_lengths_kv == (34,)
+    assert torch.all(request.key_antiquant_offset == 2)
+    assert torch.all(request.value_antiquant_offset == -3)
     assert request.output.data_ptr() == output.data_ptr()
     assert impl._c8_continuing_prefill_eager_workspace == provider.result.workspace
 

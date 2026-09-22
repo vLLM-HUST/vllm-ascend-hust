@@ -43,6 +43,8 @@ class C8ContinuingPrefillRequest:
     block_table: torch.Tensor
     key_antiquant_scale: torch.Tensor
     value_antiquant_scale: torch.Tensor
+    key_antiquant_offset: torch.Tensor
+    value_antiquant_offset: torch.Tensor
     output: torch.Tensor
     attention_mask: torch.Tensor | None
     actual_seq_lengths_q: tuple[int, ...]

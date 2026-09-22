@@ -44,11 +44,15 @@ decode path.
 - paged five-dimensional NZ INT8 K/V views;
 - the prefill block table and valid KV lengths;
 - cumulative query lengths;
-- TP-local per-channel K/V antiquant scales;
+- TP-local per-channel K/V antiquant scales and broadcastable offsets;
 - GQA dimensions, block size, attention scale, mask, sparse mode, and capture
   state.
 
 The cache already contains the new K/V tokens when the provider is invoked.
+Scale tensors use the native BNSD antiquant shape. Offset tensors preserve the
+prepared host representation: either a scalar or `[1, num_kv_heads,
+head_size]`. A provider must include offset support in its eligibility check;
+it must not assume symmetric quantization unless it has verified zero offsets.
 
 ## Eligibility And Fallback
 
