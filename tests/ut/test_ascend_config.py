@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    AscendWarmupConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -924,6 +925,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendFusionConfig(unknown_key=1)
 
+    def test_ascend_warmup_config_bool_lax_and_forbid(self):
+        cfg = AscendWarmupConfig(enable_early_kernel_warmup="true", enable_early_nz_warmup="false")
+        self.assertTrue(cfg.enable_early_kernel_warmup)
+        self.assertFalse(cfg.enable_early_nz_warmup)
+        with self.assertRaises(ValueError):
+            AscendWarmupConfig(unknown_key=1)
+
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
         cfg = AscendCompilationConfig(enable_npugraph_ex="false")
         self.assertFalse(cfg.enable_npugraph_ex)
@@ -1354,10 +1362,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     def test_reduce_sample_configuration_compatibility(self, mock_fix):
         cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
             (
-                {
-                    "finegrained_tp_config": {"lmhead_tensor_parallel_size": 2},
-                    "recompute_scheduler_enable": True,
-                },
+                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
                 1,
                 None,
                 "finegrained_tp_config.lmhead_tensor_parallel_size",

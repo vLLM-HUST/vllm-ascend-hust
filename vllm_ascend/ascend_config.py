@@ -182,6 +182,18 @@ class AscendFusionConfig:
 
 
 @config
+class AscendWarmupConfig:
+    """Configuration for startup warmup that overlaps weight loading.
+
+    Both threads are joined at the end of ``load_model``, before memory
+    profiling, so they never touch the KV cache budget.
+    """
+
+    enable_early_kernel_warmup: bool = False
+    enable_early_nz_warmup: bool = False
+
+
+@config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
 
@@ -350,7 +362,6 @@ class AscendConfig:
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
-            "block_table_no_commit_optimize": 0,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
@@ -365,6 +376,10 @@ class AscendConfig:
             },
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": true
+            },
+            "ascend_warmup_config": {
+                "enable_early_kernel_warmup": false,
+                "enable_early_nz_warmup": false
             },
             "eplb_config": {
                 "dynamic_eplb": false,
@@ -510,13 +525,12 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
-    # MRv1 only: 0 uses dirty-range commits; 1 restores a full-table H2D copy.
-    block_table_no_commit_optimize: Literal[0, 1] = 0
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
+    ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
@@ -696,14 +710,12 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
-            or self.finegrained_tp_config.lmhead_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "finegrained_tp_config requires recompute_scheduler_enable=true: "
-                "it keeps decode-node steps decode-shaped.",
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
+                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
