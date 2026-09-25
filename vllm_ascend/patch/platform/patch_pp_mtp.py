@@ -135,6 +135,11 @@ def _patch_scheduler_update_after_schedule() -> None:
         ):
             return
 
+        # Every earlier autoregressive output has retired before this request
+        # can be scheduled again, so cached counts are confirmed, not optimistic.
+        scheduler_output._ascend_pp_confirmed_counts = True
+        fenced_request_ids = set()
+        scheduler_output._ascend_pp_fenced_request_ids = fenced_request_ids
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests.get(req_id)
             # Intermediate prefill chunks do not depend on sampled/spec token
@@ -144,6 +149,7 @@ def _patch_scheduler_update_after_schedule() -> None:
             # and decode chunks.
             if request is not None and not request.is_prefill_chunk:
                 request.next_decode_eligible_step = _PP_IN_FLIGHT_STEP
+                fenced_request_ids.add(req_id)
 
     _patched_update_after_schedule._vllm_ascend_pp_mtp_inflight_patched = True  # type: ignore[attr-defined]
     Scheduler._update_after_schedule = _patched_update_after_schedule
@@ -275,7 +281,10 @@ def _patch_scheduler_update_from_output() -> None:
         )
 
         if use_pp_ipc_runtime_patch:
-            for req_id in scheduler_output.num_scheduled_tokens:
+            # Earlier intermediate-prefill outputs may retire after a later
+            # final chunk established a decode fence. Only its owning output
+            # can release that fence; live Request state is already newer.
+            for req_id in getattr(scheduler_output, "_ascend_pp_fenced_request_ids", ()):
                 request = self.requests.get(req_id)
                 if request is not None:
                     request.next_decode_eligible_step = 0

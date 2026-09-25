@@ -167,6 +167,12 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.pp_hybrid_feedback import (
+    retain_request_feedback,
+    sampled_tail_and_counts,
+    scheduled_draft_inputs,
+    sync_sampled_tokens,
+)
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -343,6 +349,7 @@ class NPUModelRunner(GPUModelRunner):
         # use_hybrid_blocks: if hybrid blocks is used.
         self.use_hybrid_blocks: bool = False
         self.need_accepted_tokens: bool = False
+        self._hybrid_accepted_by_req: dict[str, int] = {}
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
@@ -679,6 +686,25 @@ class NPUModelRunner(GPUModelRunner):
     def _is_pd_prefill_worker(self) -> bool:
         return self.is_kv_producer and not self.is_kv_consumer
 
+    def _prepare_input_ids(self, scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens):
+        super()._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
+        pp = get_pp_group()
+        if not self.use_async_scheduling or pp.world_size == 1 or pp.is_last_rank:
+            return
+        # The generic async fast path scatters locally generated GPU drafts.
+        # Earlier PP stages have no drafter. Their authoritative IDs arrive in
+        # SchedulerOutput, and must overwrite old device slots even when every
+        # request is shared with the previous batch (the copy-elision path).
+        indices, tokens = scheduled_draft_inputs(
+            self.input_batch.req_ids, scheduler_output.scheduled_spec_decode_tokens, cu_num_tokens
+        )
+        if indices:
+            self.input_ids.gpu.scatter_(
+                0,
+                torch.tensor(indices, dtype=torch.int64, device=self.device),
+                torch.tensor(tokens, dtype=self.input_ids.gpu.dtype, device=self.device),
+            )
+
     def _apply_pp_sampled_tokens_from_scheduler_output(
         self,
         scheduler_output: "SchedulerOutput",
@@ -745,6 +771,21 @@ class NPUModelRunner(GPUModelRunner):
         ).unsqueeze(1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        if self.cache_config.mamba_cache_mode == "align" and self.num_accepted_tokens_event is not None:
+            # A PP batch can be empty or switch to another microbatch. Batch row
+            # removal is not preemption: the request's running recurrent state
+            # still lives at the accepted speculative offset in its cache block.
+            self.num_accepted_tokens_event.synchronize()
+            reset_ids = set(scheduler_output.finished_req_ids)
+            reset_ids.update(scheduler_output.preempted_req_ids or ())
+            reset_ids.update(scheduler_output.scheduled_cached_reqs.resumed_req_ids)
+            reset_ids.update(req.req_id for req in scheduler_output.scheduled_new_reqs)
+            self._hybrid_accepted_by_req = retain_request_feedback(
+                self._hybrid_accepted_by_req,
+                self.input_batch.req_ids,
+                self.accepted_tokens_feedback_cpu.numpy(),
+                reset_ids,
+            )
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -760,6 +801,28 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
+        if self.use_async_scheduling and getattr(scheduler_output, "_ascend_pp_confirmed_counts", False):
+            # PP's per-request fence retired the previous sampling result.
+            # Generic async correction would subtract rejections a second time.
+            # Preserve async execution, but reconcile bookkeeping to those
+            # authoritative scheduler counts before the generic row update.
+            for i, req_id in enumerate(req_data.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+                req_state.prev_num_draft_len = 0
+                output_count = req_data.num_output_tokens[i]
+                missing = output_count - len(req_state.output_token_ids)
+                if missing > 0:
+                    req_state.output_token_ids.extend([PLACEHOLDER_TOKEN_ID] * missing)
+                elif missing < 0:
+                    del req_state.output_token_ids[output_count:]
+                row = self.input_batch.req_id_to_index.get(req_id)
+                if row is not None:
+                    start = self.input_batch.num_tokens_no_spec[row]
+                    end = self.input_batch.num_prompt_tokens[row] + output_count
+                    self.input_batch.is_token_ids[row, start:end] = True
+                    self.input_batch.num_tokens_no_spec[row] = end
         return super()._update_states(scheduler_output)
 
     def _pad_query_start_loc_for_fia(
@@ -1033,24 +1096,34 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
+            accepted_feedback = (
+                self.accepted_tokens_feedback_cpu.numpy()
+                if self.cache_config.mamba_cache_mode == "align"
+                else self.input_batch.num_accepted_tokens_cpu
+            )
+            # Reintroduced rows still own their prior recurrent-state offsets.
+            if self.cache_config.mamba_cache_mode == "align":
+                self.num_accepted_tokens.np[:num_reqs] = [
+                    self._hybrid_accepted_by_req.get(req_id, 1)
+                    for req_id in self.input_batch.req_ids
+                ]
+            elif self.use_async_scheduling:
                 prev_idx = self.prev_positions.np[:num_reqs]
                 new_mask = prev_idx < 0
                 self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[
+                    accepted_feedback[
                         np.where(new_mask, 0, prev_idx)
                     ]
                 )
                 self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
             else:
                 # Non-async mode: use values directly
                 self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    accepted_feedback[:num_reqs]
                 )
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                self.num_accepted_tokens.np[:num_reqs]
+            )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -2068,6 +2141,8 @@ class NPUModelRunner(GPUModelRunner):
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
+                    if self.speculative_config is not None and self.model_config.is_hybrid:
+                        self._pp_hybrid_scheduler_output = scheduler_output
                     self._finalize_dump_data()
                     if self.dynamic_eplb:
                         self.eplb_updator.forward_end(self.eplb_heat_collection_status)
@@ -2137,6 +2212,17 @@ class NPUModelRunner(GPUModelRunner):
         use_pp_spec_decode = self.speculative_config is not None and pp.world_size > 1
 
         if self.execute_model_state is None:
+            # Earlier hybrid PP stages own recurrent state too. They need the
+            # final stage's accepted-token result before their next forward.
+            previous_output = getattr(self, "_pp_hybrid_scheduler_output", None)
+            if previous_output is not None:
+                self._pp_hybrid_scheduler_output = None
+                sampled = sync_sampled_tokens(
+                    pp, None, self.input_batch.num_reqs, self.num_spec_tokens, self.device
+                )
+                self._update_states_after_model_execute(sampled, previous_output)
+                next_ids, counts = sampled_tail_and_counts(sampled)
+                self._copy_valid_sampled_token_count(next_ids, counts)
             # Nothing to do (PP non-final rank case), output isn't used.
             if not kv_connector_output:
                 return None  # noqa
@@ -2309,6 +2395,11 @@ class NPUModelRunner(GPUModelRunner):
                 torch.npu.stream(global_stream()),
             ):
                 global_stream().wait_event(self.sampling_done_event)
+                if use_pp_spec_decode and self.model_config.is_hybrid and not self.broadcast_pp_output:
+                    sync_sampled_tokens(
+                        pp, sampler_output.sampled_token_ids,
+                        self.input_batch.num_reqs, self.num_spec_tokens, self.device,
+                    )
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
