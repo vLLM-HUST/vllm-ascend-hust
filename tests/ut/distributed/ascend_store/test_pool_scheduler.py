@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +24,7 @@ import pytest
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     LoadSpec,
+    RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
@@ -1243,3 +1245,34 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_running_mamba_tracker_clears_expired_blocks_before_save():
+    """Saved metadata must not retain a prefix state already released by MambaManager."""
+    scheduler = object.__new__(KVPoolScheduler)
+    tracker = RequestTracker(
+        req_id="r1",
+        token_len=8192,
+        allocated_block_ids_by_group=[[30, 31], [10, 11, 12]],
+        mamba_group_ids=[1],
+        num_speculative_blocks=1,
+        block_sizes=[4096, 4096],
+    )
+    request = SimpleNamespace(
+        num_computed_tokens=8192,
+        num_prompt_tokens=16384,
+        all_token_ids=[],
+        prompt_token_ids=[],
+        block_hashes=[0, 1, 2, 3],
+    )
+    scheduler._unfinished_requests = {"r1": (request, [])}
+    scheduler._request_trackers = {"r1": tracker}
+    scheduler.hash_block_size = 4096
+    scheduler._block_size = 4096
+    scheduler.use_gva_layerwise = False
+    scheduler._build_req_meta = MagicMock()
+    output = SimpleNamespace(num_scheduled_tokens={"r1": 4096})
+    scheduler._process_running_cached_request(([32], [13]), "r1", 0, None, output, False)
+    assert tracker.allocated_block_ids_by_group[0] == [30, 31, 32]
+    assert tracker.allocated_block_ids_by_group[1] == [0, 11, 12, 13]
+    assert tracker.token_len == 12288

@@ -858,7 +858,7 @@ class KVPoolScheduler:
             if last_block_key is not None:
                 request_tracker.last_block_key = last_block_key
         if new_block_ids is not None:
-            request_tracker.update(new_block_ids)
+            request_tracker.update(new_block_ids, num_computed_tokens=request.num_computed_tokens)
         load_spec = None
         return self._build_req_meta(
             request_tracker,
