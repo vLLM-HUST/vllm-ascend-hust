@@ -170,6 +170,41 @@ def test_provider_receives_paged_int8_contract_and_owns_output():
     assert impl._c8_continuing_prefill_eager_workspace == workspace
 
 
+def test_mixed_batch_request_slices_decode_rows_from_all_prefill_metadata():
+    impl = make_impl()
+    impl.key_cache = torch.zeros((8, 32, 1, 32), dtype=torch.int8)
+    impl.value_cache = torch.zeros((8, 32, 1, 32), dtype=torch.int8)
+    metadata = SimpleNamespace(
+        num_decode_tokens=2,
+        num_decodes=2,
+        num_prefills=2,
+        actual_seq_lengths_q=[1, 2, 5, 9],
+        seq_lens_list=[33, 65, 35, 68],
+        block_tables=torch.tensor(
+            [
+                [0, 1, -1],
+                [2, 3, -1],
+                [4, 5, -1],
+                [6, 7, 0],
+            ]
+        ),
+        attn_mask=None,
+        causal=True,
+    )
+    query = torch.arange(9 * 2 * 32, dtype=torch.float32).reshape(9, 2, 32)
+    output = torch.zeros_like(query)
+
+    request = impl._build_c8_continuing_prefill_request(query, metadata, output, make_layer())
+
+    assert request.query.shape == (7, 2, 32)
+    assert request.query.data_ptr() == query[2:].data_ptr()
+    assert request.output.shape == (7, 2, 32)
+    assert request.output.data_ptr() == output[2:].data_ptr()
+    assert request.actual_seq_lengths_q == (3, 7)
+    assert request.actual_seq_lengths_kv == (35, 68)
+    assert request.block_table.tolist() == [[4, 5, -1], [6, 7, 0]]
+
+
 def test_provider_ineligible_uses_host_fallback_without_execution():
     provider = RecordingProvider(eligible=False)
     impl = make_impl(provider)
