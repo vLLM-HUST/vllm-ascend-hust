@@ -15,11 +15,16 @@ class C8ContinuingPrefillProviderConfig:
     """Static C8 attention properties supplied to a provider factory."""
 
     layer_name: str
+    model: str
+    model_revision: str | None
+    tensor_parallel_rank: int
+    tensor_parallel_size: int
     num_heads: int
     num_kv_heads: int
     head_size: int
     scale: float
     kv_cache_dtype: torch.dtype
+    provider_config_json: str
 
 
 @dataclass(frozen=True, slots=True)

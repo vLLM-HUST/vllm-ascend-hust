@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
@@ -1372,22 +1373,34 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
     def configure_c8_continuing_prefill_provider(self, layer_name: str) -> None:
         """Resolve the optional provider before warmup or graph capture."""
-        factory_path = get_ascend_config().c8_continuing_prefill_provider
+        ascend_config = get_ascend_config()
+        factory_path = ascend_config.c8_continuing_prefill_provider
         self._c8_continuing_prefill_provider: C8ContinuingPrefillProvider | None = None
         self._c8_continuing_prefill_eager_workspace: tuple[torch.Tensor, ...] = ()
         self._c8_continuing_prefill_graph_workspaces: list[tuple[torch.Tensor, ...]] = []
         if factory_path is None:
             return
 
+        model_config = self.vllm_config.model_config
         self._c8_continuing_prefill_provider = load_c8_continuing_prefill_provider(
             factory_path,
             C8ContinuingPrefillProviderConfig(
                 layer_name=layer_name,
+                model=model_config.model,
+                model_revision=model_config.revision,
+                tensor_parallel_rank=get_tensor_model_parallel_rank(),
+                tensor_parallel_size=get_tensor_model_parallel_world_size(),
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 scale=self.scale,
                 kv_cache_dtype=self.kv_cache_dtype,
+                provider_config_json=json.dumps(
+                    ascend_config.c8_continuing_prefill_provider_config,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
             ),
         )
 

@@ -368,6 +368,7 @@ class AscendConfig:
             "enable_sparse_li_c8": false,
             "c8_enable_reshape_optim": true,
             "c8_continuing_prefill_provider": null,
+            "c8_continuing_prefill_provider_config": {},
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -556,6 +557,10 @@ class AscendConfig:
     # Optional ``module:factory`` path for a generic paged-C8
     # continuing-prefill provider. None preserves the built-in dense fallback.
     c8_continuing_prefill_provider: str | None = None
+    # Provider-owned JSON configuration. The Host validates and canonicalizes
+    # this object before passing it to the factory; it does not interpret
+    # project-specific profile fields.
+    c8_continuing_prefill_provider_config: dict[str, Any] = dataclasses.field(default_factory=dict)
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -568,6 +573,19 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.c8_continuing_prefill_provider is not None and not self.c8_continuing_prefill_provider.strip():
+            raise ValueError("c8_continuing_prefill_provider must be a non-empty module:factory path")
+        if self.c8_continuing_prefill_provider is None and self.c8_continuing_prefill_provider_config:
+            raise ValueError("c8_continuing_prefill_provider_config requires c8_continuing_prefill_provider")
+        try:
+            json.dumps(
+                self.c8_continuing_prefill_provider_config,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("c8_continuing_prefill_provider_config must contain finite JSON values") from error
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

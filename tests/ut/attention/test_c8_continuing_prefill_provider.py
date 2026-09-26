@@ -35,11 +35,16 @@ class RecordingProvider:
 def make_provider_config() -> C8ContinuingPrefillProviderConfig:
     return C8ContinuingPrefillProviderConfig(
         layer_name="model.layers.0.self_attn.attn",
+        model="Qwen/Qwen3.5-35B-A3B",
+        model_revision="59d61f3ce65a6d9863b86d2e96597125219dc754",
+        tensor_parallel_rank=0,
+        tensor_parallel_size=2,
         num_heads=2,
         num_kv_heads=1,
         head_size=32,
         scale=0.125,
         kv_cache_dtype=torch.int8,
+        provider_config_json='{"profile_sha256":"abc"}',
     )
 
 
@@ -91,10 +96,73 @@ def test_provider_config_is_default_off_and_accepts_factory_path():
     configured = AscendConfig(
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         c8_continuing_prefill_provider="example.provider:create",
+        c8_continuing_prefill_provider_config={"profile_sha256": "abc"},
     )
 
     assert default.c8_continuing_prefill_provider is None
+    assert default.c8_continuing_prefill_provider_config == {}
     assert configured.c8_continuing_prefill_provider == "example.provider:create"
+    assert configured.c8_continuing_prefill_provider_config == {"profile_sha256": "abc"}
+
+
+def test_provider_config_rejects_unbound_or_non_json_values():
+    with pytest.raises(ValueError, match="requires c8_continuing_prefill_provider"):
+        AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            c8_continuing_prefill_provider_config={"profile_sha256": "abc"},
+        )
+
+    with pytest.raises(ValueError, match="finite JSON values"):
+        AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            c8_continuing_prefill_provider="example.provider:create",
+            c8_continuing_prefill_provider_config={"threshold": float("nan")},
+        )
+
+
+def test_configure_provider_passes_runtime_identity_and_canonical_config():
+    impl = make_impl()
+    impl.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            model="Qwen/Qwen3.5-35B-A3B",
+            revision="59d61f3ce65a6d9863b86d2e96597125219dc754",
+        )
+    )
+    provider = RecordingProvider()
+    config = SimpleNamespace(
+        c8_continuing_prefill_provider="example.provider:create",
+        c8_continuing_prefill_provider_config={
+            "zero_offsets_attested": True,
+            "profile_sha256": "abc",
+        },
+    )
+
+    with (
+        patch("vllm_ascend.attention.attention_v1.get_ascend_config", return_value=config),
+        patch(
+            "vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank",
+            return_value=1,
+        ),
+        patch(
+            "vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size",
+            return_value=2,
+        ),
+        patch(
+            "vllm_ascend.attention.attention_v1.load_c8_continuing_prefill_provider",
+            return_value=provider,
+        ) as load_provider,
+    ):
+        impl.configure_c8_continuing_prefill_provider("model.layers.3.self_attn.attn")
+
+    factory_path, factory_config = load_provider.call_args.args
+    assert factory_path == "example.provider:create"
+    assert factory_config.layer_name == "model.layers.3.self_attn.attn"
+    assert factory_config.model == "Qwen/Qwen3.5-35B-A3B"
+    assert factory_config.model_revision == "59d61f3ce65a6d9863b86d2e96597125219dc754"
+    assert factory_config.tensor_parallel_rank == 1
+    assert factory_config.tensor_parallel_size == 2
+    assert factory_config.provider_config_json == ('{"profile_sha256":"abc","zero_offsets_attested":true}')
+    assert impl._c8_continuing_prefill_provider is provider
 
 
 def test_load_provider_from_explicit_factory(monkeypatch):
