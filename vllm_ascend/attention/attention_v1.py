@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
@@ -43,8 +44,16 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.continuing_prefill import (
+    C8ContinuingPrefillProvider,
+    C8ContinuingPrefillProviderConfig,
+    C8ContinuingPrefillRequest,
+    C8ContinuingPrefillResult,
+    load_c8_continuing_prefill_provider,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_dcp,
@@ -1362,6 +1371,122 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
     so that C8 attention layers automatically use this forward path.
     """
 
+    def configure_c8_continuing_prefill_provider(self, layer_name: str) -> None:
+        """Resolve the optional provider before warmup or graph capture."""
+        ascend_config = get_ascend_config()
+        factory_path = ascend_config.c8_continuing_prefill_provider
+        self._c8_continuing_prefill_provider: C8ContinuingPrefillProvider | None = None
+        self._c8_continuing_prefill_eager_workspace: tuple[torch.Tensor, ...] = ()
+        self._c8_continuing_prefill_graph_workspaces: list[tuple[torch.Tensor, ...]] = []
+        if factory_path is None:
+            return
+
+        model_config = self.vllm_config.model_config
+        self._c8_continuing_prefill_provider = load_c8_continuing_prefill_provider(
+            factory_path,
+            C8ContinuingPrefillProviderConfig(
+                layer_name=layer_name,
+                model=model_config.model,
+                model_revision=model_config.revision,
+                tensor_parallel_rank=get_tensor_model_parallel_rank(),
+                tensor_parallel_size=get_tensor_model_parallel_world_size(),
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                kv_cache_dtype=self.kv_cache_dtype,
+                provider_config_json=json.dumps(
+                    ascend_config.c8_continuing_prefill_provider_config,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ),
+        )
+
+    def _has_cached_multi_token_prefill(self, attn_metadata: AscendMetadata) -> bool:
+        if attn_metadata.num_prefills <= 0 or not attn_metadata.causal:
+            return False
+
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        for index in range(attn_metadata.num_decodes, len(attn_metadata.seq_lens_list)):
+            query_start = actual_seq_qlen[index - 1] if index > 0 else 0
+            query_length = actual_seq_qlen[index] - query_start
+            if query_length > 1 and attn_metadata.seq_lens_list[index] > query_length:
+                return True
+        return False
+
+    def _try_c8_continuing_prefill_provider(
+        self,
+        request: C8ContinuingPrefillRequest,
+    ) -> bool:
+        provider = getattr(self, "_c8_continuing_prefill_provider", None)
+        if provider is None:
+            return False
+
+        eligible = provider.is_eligible(request)
+        if not isinstance(eligible, bool):
+            raise TypeError(
+                f"C8 continuing-prefill provider is_eligible(request) must return bool, got {type(eligible).__name__}"
+            )
+        if not eligible:
+            return False
+
+        result = provider.forward(request)
+        if not isinstance(result, C8ContinuingPrefillResult):
+            raise TypeError(
+                "An eligible C8 continuing-prefill provider must return "
+                "C8ContinuingPrefillResult, "
+                f"got {type(result).__name__}"
+            )
+        if any(not isinstance(tensor, torch.Tensor) for tensor in result.workspace):
+            raise TypeError("C8 continuing-prefill provider workspace entries must be torch.Tensor instances")
+
+        if request.capturing:
+            self._c8_continuing_prefill_graph_workspaces = getattr(self, "_c8_continuing_prefill_graph_workspaces", [])
+            self._c8_continuing_prefill_graph_workspaces.append(result.workspace)
+        else:
+            self._c8_continuing_prefill_eager_workspace = result.workspace
+        return True
+
+    def _build_c8_continuing_prefill_request(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        layer: AttentionLayer,
+    ) -> C8ContinuingPrefillRequest:
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_decodes = attn_metadata.num_decodes
+        actual_seq_qlen = attn_metadata.actual_seq_lengths_q
+        num_tokens = int(actual_seq_qlen[-1])
+        prefill_seq_qlen = [
+            actual_seq_qlen[index] - num_decode_tokens for index in range(num_decodes, len(actual_seq_qlen))
+        ]
+        _, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
+
+        return C8ContinuingPrefillRequest(
+            query=query[num_decode_tokens:num_tokens],
+            key_cache=self._nz_5d_view(self.key_cache, block_size),
+            value_cache=self._nz_5d_view(self.value_cache, block_size),
+            block_table=attn_metadata.block_tables[num_decodes:],
+            key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
+            value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
+            key_antiquant_offset=layer._c8_k_offset,
+            value_antiquant_offset=layer._c8_v_offset,
+            output=output[num_decode_tokens:num_tokens],
+            attention_mask=attn_metadata.attn_mask,
+            actual_seq_lengths_q=tuple(int(length) for length in prefill_seq_qlen),
+            actual_seq_lengths_kv=tuple(int(length) for length in attn_metadata.seq_lens_list[num_decodes:]),
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            block_size=block_size,
+            scale=self.scale,
+            sparse_mode=3,
+            capturing=bool(_EXTRA_CTX.capturing),
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -1400,6 +1525,23 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
             # therefore, the graph-mode condition needs to be evaluated earlier.
+            if (
+                _EXTRA_CTX.capturing
+                and getattr(self, "_c8_continuing_prefill_provider", None) is not None
+                and self._has_cached_multi_token_prefill(attn_metadata)
+            ):
+                provider_request = self._build_c8_continuing_prefill_request(query, attn_metadata, output, layer)
+                if self._try_c8_continuing_prefill_provider(provider_request):
+                    return self._forward_c8_chunked_prefill(
+                        query,
+                        float_key,
+                        float_value,
+                        attn_metadata,
+                        output,
+                        layer,
+                        provider_request=provider_request,
+                        provider_output_ready=True,
+                    )
             if _EXTRA_CTX.capturing:
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1445,6 +1587,23 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
+                if (
+                    _EXTRA_CTX.capturing
+                    and getattr(self, "_c8_continuing_prefill_provider", None) is not None
+                    and self._has_cached_multi_token_prefill(attn_metadata)
+                ):
+                    provider_request = self._build_c8_continuing_prefill_request(query, attn_metadata, output, layer)
+                    if self._try_c8_continuing_prefill_provider(provider_request):
+                        return self._forward_c8_chunked_prefill(
+                            query,
+                            None,
+                            None,
+                            attn_metadata,
+                            output,
+                            layer,
+                            provider_request=provider_request,
+                            provider_output_ready=True,
+                        )
                 if _EXTRA_CTX.capturing:
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
@@ -1609,6 +1768,8 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
         layer: AttentionLayer,
+        provider_request: C8ContinuingPrefillRequest | None = None,
+        provider_output_ready: bool = False,
     ) -> torch.Tensor:
         """C8 ChunkedPrefill: decode via FIA V1 BNSD paged INT8 (zero gather),
         prefill via FIA V1 TND with float KV (new) or gather+dequant (continuing).
@@ -1673,6 +1834,17 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
                 prefill_bt = attn_metadata.block_tables[num_decodes:]
                 prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
+                if provider_output_ready:
+                    return output
+                if getattr(
+                    self, "_c8_continuing_prefill_provider", None
+                ) is not None and self._has_cached_multi_token_prefill(attn_metadata):
+                    if provider_request is None:
+                        provider_request = self._build_c8_continuing_prefill_request(
+                            query, attn_metadata, output, layer
+                        )
+                    if self._try_c8_continuing_prefill_provider(provider_request):
+                        return output
                 prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
                     paged_k, paged_v, prefill_bt, prefill_sl, query.dtype, layer
                 )
@@ -1714,6 +1886,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 FIA V1 TND for prefill states (PrefillNoCache uses float KV directly,
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit
+            and getattr(self, "_c8_continuing_prefill_provider", None) is not None
+            and self._has_cached_multi_token_prefill(attn_metadata)
+        ):
+            provider_request = self._build_c8_continuing_prefill_request(query, attn_metadata, output, layer)
+            if self._try_c8_continuing_prefill_provider(provider_request):
+                return output
+
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
