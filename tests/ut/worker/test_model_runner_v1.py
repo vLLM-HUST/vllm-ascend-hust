@@ -1061,7 +1061,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         from tests.deepseek_v41_utils import make_cache_config
 
         class V41CacheLayer:
-            pass
+            kv_cache: list[torch.Tensor]
 
         runner = self._build_runner()
         runner.cache_config = MagicMock()
