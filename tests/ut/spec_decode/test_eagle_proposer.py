@@ -25,6 +25,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
+import vllm_ascend.ascend_forward_context as ascend_forward_context
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
@@ -45,6 +46,16 @@ enable_custom_op()
 _CPU_GPU_BUFFER_TARGET = "vllm.v1.spec_decode.llm_base_proposer.CpuGpuBuffer"
 
 BLOCK_SIZE = 16
+
+
+@pytest.fixture(autouse=True)
+def use_v1_forward_context(monkeypatch):
+    """Keep legacy proposer fixtures on the V1 forward-context layout."""
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        False,
+    )
+    monkeypatch.setattr(ascend_forward_context, "_USE_V2_EXTRA_KWARGS", False)
 
 
 @dataclass
@@ -1571,7 +1582,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_sync_metadata_across_dp")
         sig = inspect.signature(RunnerCls._sync_metadata_across_dp)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode', 'allow_dp_padding']
+        assert sig_name == ['self', 'num_tokens', 'is_draft_model', 'cudagraph_mode']
 
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
