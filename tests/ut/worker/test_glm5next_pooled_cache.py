@@ -120,6 +120,7 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = config
+    runner.cache_config = config.cache_config
     runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     runner.compilation_config = config.compilation_config
     runner.runner_only_attn_layers = set()

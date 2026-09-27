@@ -1198,13 +1198,17 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIs(specs[layer_name], packed_spec)
         backend.customize_spec.assert_called_once_with(unpacked_spec)
 
-    def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):
-        for capture_sizes, expected_tp_size in (([48, 96], 1), ([16, 32], 16)):
-            with self.subTest(capture_sizes=capture_sizes):
+    def test_full_decode_graph_alignment_overrides_resolver_tp_size(self):
+        for graph_mode, expected_tp_size in (
+            (CUDAGraphMode.FULL_DECODE_ONLY, 1),
+            (CUDAGraphMode.NONE, 16),
+        ):
+            with self.subTest(graph_mode=graph_mode):
                 runner = self._build_runner()
                 compilation_config = SimpleNamespace(
                     pass_config=SimpleNamespace(enable_sp=True),
-                    cudagraph_capture_sizes=capture_sizes,
+                    cudagraph_mode=graph_mode,
+                    adjust_cudagraph_sizes_for_spec_decode=MagicMock(),
                     resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
                 )
                 runner.compilation_config = compilation_config
@@ -1219,13 +1223,27 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 runner.drafter = None
                 runner.use_aclgraph = False
 
-                runner._check_and_update_cudagraph_mode([], [])
+                with (
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.enable_dsa_cp",
+                        return_value=False,
+                    ),
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.enable_sp",
+                        return_value=False,
+                    ),
+                ):
+                    runner._check_and_update_cudagraph_mode([], [])
 
                 call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
                 self.assertEqual(
                     call_kwargs["tensor_parallel_size"],
                     expected_tp_size,
                 )
+                if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                    compilation_config.adjust_cudagraph_sizes_for_spec_decode.assert_called_once_with(48, 1)
+                else:
+                    compilation_config.adjust_cudagraph_sizes_for_spec_decode.assert_not_called()
 
     def test_initialize_uses_standardized_strided_kv_layout(self):
         runner = self._build_runner()
@@ -1533,7 +1551,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtypes=(torch.float32,),
         )
 
-        main_module = SimpleNamespace(get_kv_cache_spec=lambda _config: main_spec)
+        main_module = SimpleNamespace(
+            get_kv_cache_spec=lambda _config: main_spec,
+            get_attn_backend=lambda: SimpleNamespace(customize_spec=lambda spec: spec),
+        )
         indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
         torch.nn.Module.__init__(indexer_module)
         indexer_module.get_kv_cache_spec = lambda _config: indexer_spec

@@ -57,10 +57,14 @@ def test_dp_shared_memory_config_and_topologies(tp, dp, external):
         config.verify_parallel_config(_topology(tp, dp, nnodes=2))
 
 
-def test_dp_shared_memory_survives_cli_parsing():
+def test_dp_shared_memory_survives_cli_parsing(monkeypatch):
     from vllm.engine.arg_utils import EngineArgs
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+    monkeypatch.setattr(
+        "vllm.engine.arg_utils.get_model_path",
+        lambda model, _revision: model,
+    )
     value = {"cpu_offload": True, "dp_shared_memory": True}
     direct = EngineArgs(engram_config=value).engram_config
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

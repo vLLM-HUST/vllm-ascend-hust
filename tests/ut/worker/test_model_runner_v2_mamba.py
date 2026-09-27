@@ -647,6 +647,9 @@ def test_mamba_spec_follows_aligned_attention_spec(
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
 
+        def get_attn_backend(self):
+            return SimpleNamespace(customize_spec=lambda spec: spec)
+
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
@@ -696,6 +699,9 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
 
         def get_kv_cache_spec(self, _vllm_config):
             return self.spec
+
+        def get_attn_backend(self):
+            return SimpleNamespace(customize_spec=lambda spec: spec)
 
     mamba_layer = MagicMock()
     mamba_layer.kv_sharing_target_layer_name = None

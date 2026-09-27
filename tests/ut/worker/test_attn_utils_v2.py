@@ -86,6 +86,9 @@ def test_get_kv_cache_spec_applies_backend_packing(monkeypatch):
     )
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
     )
 
     specs = attn_utils.get_kv_cache_spec(vllm_config)
