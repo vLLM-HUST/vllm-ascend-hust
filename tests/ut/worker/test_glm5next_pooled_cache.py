@@ -12,6 +12,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
@@ -73,6 +74,7 @@ def _make_config():
             num_gpu_blocks_override=None,
             mamba_cache_mode="none",
             enable_prefix_caching=False,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
         ),
         kv_transfer_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}),

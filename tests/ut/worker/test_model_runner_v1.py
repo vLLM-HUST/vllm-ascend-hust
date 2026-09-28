@@ -1232,6 +1232,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                         "vllm_ascend.worker.model_runner_v1.enable_sp",
                         return_value=False,
                     ),
+                    patch(
+                        "vllm_ascend.worker.model_runner_v1.update_pass_config",
+                        return_value=nullcontext(),
+                    ),
                 ):
                     runner._check_and_update_cudagraph_mode([], [])
 
