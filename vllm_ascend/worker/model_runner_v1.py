@@ -4791,9 +4791,14 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        if is_deepseek_v41_cache(kv_cache_config.kv_cache_groups) or any(
-            is_glm5_next_cache_spec(spec)
-            for spec in self._get_layer_kv_cache_specs(kv_cache_config).values()
+        model_type = getattr(
+            getattr(self.model_config, "hf_text_config", None),
+            "model_type",
+            None,
+        )
+        if (
+            is_deepseek_v41_cache(kv_cache_config.kv_cache_groups)
+            or model_type == "glm5_next"
         ):
             # DeepSeek V4.1 and GLM-Next overlay heterogeneous cache
             # components on model-specific physical slots. GLM-Next uses a
