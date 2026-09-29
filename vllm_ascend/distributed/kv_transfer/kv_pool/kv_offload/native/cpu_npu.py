@@ -10,6 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.observability import (
+    TransferOperation,
+    emit_kv_transfer_descriptors,
+    kv_transfer_observers_configured,
+)
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -22,7 +27,10 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
+from vllm.v1.kv_offload.cpu.gpu_worker import (
+    build_region_descriptors,
+    compute_sub_block_ptrs,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
@@ -143,6 +151,9 @@ class SingleDirectionNPUOffloadingHandler:
         dst_offset = 0
         op_idx = 0
         num_transfer_bytes = 0
+        # Region-relative layout capture is opt-in and costs nothing while no
+        # observer is registered process-wide.
+        layout: list[tuple[int, int, int]] | None = [] if kv_transfer_observers_configured() else None
         for group_size, block_idx, group_data_refs in zip(
             group_sizes,
             block_indices,
@@ -184,6 +195,8 @@ class SingleDirectionNPUOffloadingHandler:
                 )
                 all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
                 num_transfer_bytes += group_size * data_ref.page_size_bytes
+                if layout is not None:
+                    layout.append((tensor_idx, op_idx, end_idx))
                 op_idx = end_idx
 
             src_offset = src_end_offset
@@ -192,6 +205,26 @@ class SingleDirectionNPUOffloadingHandler:
         assert src_offset == len(src_blocks)
         assert dst_offset == len(dst_blocks)
         assert op_idx == num_copy_ops
+
+        # Mirror of the core CPU handler's descriptor call site: publish the
+        # region-relative layout the backend is about to copy. Absolute
+        # pointers never leave this function.
+        if layout is not None and op_idx > 0:
+            descriptors, dropped = build_region_descriptors(
+                layout,
+                self.src_tensors,
+                self.dst_tensors,
+                all_src,
+                all_dst,
+                all_sizes,
+            )
+            emit_kv_transfer_descriptors(
+                job_id=job_id,
+                rank=None,
+                operation=(TransferOperation.D2H_PRESERVE if self.npu_to_cpu else TransferOperation.H2D_RESTORE),
+                descriptors=descriptors,
+                dropped_descriptors=dropped,
+            )
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.npu.Stream()
         start_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)

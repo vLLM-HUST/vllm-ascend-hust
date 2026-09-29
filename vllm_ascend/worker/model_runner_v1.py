@@ -2590,6 +2590,12 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if has_kv_transfer_group():
+                # Report the first real forward of an admitted recovery; dummy,
+                # profile, and capture runs go through _dummy_run instead.
+                get_kv_transfer_group().observe_forward_batch(
+                    list(scheduler_output.num_scheduled_tokens)
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
