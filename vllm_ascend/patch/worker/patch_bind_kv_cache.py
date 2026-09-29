@@ -53,6 +53,8 @@ def bind_mamba_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) ->
 if not vllm_version_is("0.29.0"):
     MambaBase.bind_kv_cache = bind_mamba_cache
 
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
@@ -117,7 +119,11 @@ def bind_kv_cache_to_layers(
     matching the Ascend bind_kv_cache patch above.
     """
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        if isinstance(layer, DeepseekV41CacheLayer):
+            layer.bind_kv_cache(kv_cache)
+        else:
+            layer.kv_cache = kv_cache
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
