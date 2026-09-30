@@ -83,6 +83,7 @@ def _build_apply_layer():
         swiglu_beta=0.0,
         activation="gelu",
         apply_router_weight_on_input=True,
+        moe_config=SimpleNamespace(num_experts=4),
         ascend_expert_map=None,
         global_redundant_expert_num=0,
         log2phy=None,

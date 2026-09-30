@@ -11,17 +11,20 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.patch.worker.patch_mamba_utils import _get_mamba_groups
 
 
-def _mamba_spec(block_size: int) -> MambaSpec:
+def _mamba_spec(
+    block_size: int,
+    shape: tuple[int, ...] = (1, 8),
+) -> MambaSpec:
     return MambaSpec(
         block_size=block_size,
-        shapes=((1, 8),),
+        shapes=(shape,),
         dtypes=(torch.bfloat16,),
     )
 
 
 def test_get_mamba_groups_preserves_current_core_mapping_contract() -> None:
     first = _mamba_spec(16)
-    second = _mamba_spec(32)
+    second = _mamba_spec(16, (2, 4))
     wrapped = UniformTypeKVCacheSpecs.from_specs({"layer.1": first, "layer.2": second})
     assert wrapped is not None
     config = KVCacheConfig(

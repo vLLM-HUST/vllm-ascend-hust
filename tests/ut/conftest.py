@@ -40,12 +40,17 @@ except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
 if not _npu_available:
-    triton_runtime = MagicMock()
-    triton_runtime.driver.active.utils.get_device_properties.return_value = {
+    # Import the real package before replacing its hardware-facing driver.
+    # Replacing ``sys.modules["triton.runtime"]`` with a non-package mock makes
+    # Triton 3.6 fail while importing its required ``triton.runtime.jit``
+    # submodule during vLLM-Ascend plugin initialization.
+    triton_runtime = importlib.import_module("triton.runtime")
+    triton_driver = MagicMock()
+    triton_driver.active.utils.get_device_properties.return_value = {
         "num_aic": 8,
         "num_vectorcore": 8,
     }
-    sys.modules["triton.runtime"] = triton_runtime
+    triton_runtime.driver = triton_driver  # type: ignore[attr-defined]
     torch_npu = types.ModuleType("torch_npu")
     torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
     torch_npu.__path__ = []
