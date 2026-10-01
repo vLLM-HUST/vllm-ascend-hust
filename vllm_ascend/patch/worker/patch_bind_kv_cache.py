@@ -53,7 +53,7 @@ def bind_mamba_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) ->
 if not vllm_version_is("0.29.0"):
     MambaBase.bind_kv_cache = bind_mamba_cache
 
-from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer  # noqa: E402
 
 
 def bind_kv_cache(
