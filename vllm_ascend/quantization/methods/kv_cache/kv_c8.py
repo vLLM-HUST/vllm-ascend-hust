@@ -143,6 +143,8 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
         layer.k_cache_offset.data = layer.k_cache_offset.data.flatten()
         layer.v_cache_scale.data = layer.v_cache_scale.data.flatten()
         layer.v_cache_offset.data = layer.v_cache_offset.data.flatten()
+        if hasattr(layer, "impl"):
+            layer.impl.configure_c8_continuing_prefill_provider(getattr(layer, "layer_name", self.prefix))
 
     def apply(
         self,
