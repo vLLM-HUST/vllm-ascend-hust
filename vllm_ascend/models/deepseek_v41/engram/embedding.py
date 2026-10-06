@@ -31,9 +31,10 @@ from vllm.distributed.parallel_state import get_tp_group, in_the_same_node_as
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
 
-# Upstream #56741 normalized the V4.1 model package name.
-from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
-from vllm.models.deepseek_v41.nvidia.engram import (
+# Upstream #56741 normalized the V4.1 model package name and later moved the
+# shared Engram helpers out of the NVIDIA implementation.
+from vllm.models.deepseek_v41.common.engram import (
+    ParallelEngramEmbedding,
     _gather_engram_rows,
     engram_head_shard_rank,
     gather_engram_hashes,
