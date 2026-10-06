@@ -40,12 +40,15 @@ except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
 if not _npu_available:
-    triton_runtime = MagicMock()
+    # Keep the real package so modern Triton can still resolve runtime.jit
+    # while CPU tests replace only the device-facing driver.
+    import triton.runtime as triton_runtime
+
+    triton_runtime.driver = MagicMock()
     triton_runtime.driver.active.utils.get_device_properties.return_value = {
         "num_aic": 8,
         "num_vectorcore": 8,
     }
-    sys.modules["triton.runtime"] = triton_runtime
     torch_npu = types.ModuleType("torch_npu")
     torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
     torch_npu.__path__ = []
