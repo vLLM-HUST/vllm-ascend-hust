@@ -42,7 +42,7 @@ except (subprocess.CalledProcessError, FileNotFoundError):
 if not _npu_available:
     # Keep the real package so modern Triton can still resolve runtime.jit
     # while CPU tests replace only the device-facing driver.
-    import triton.runtime as triton_runtime
+    import triton.runtime as triton_runtime  # type: ignore[import-untyped]
 
     triton_runtime.driver = MagicMock()
     triton_runtime.driver.active.utils.get_device_properties.return_value = {
