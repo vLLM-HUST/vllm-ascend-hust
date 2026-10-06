@@ -215,7 +215,7 @@ def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, r
 @pytest.mark.parametrize("dp_rank,num_tokens", [(2, 3), (3, 2), (3, 0)])
 def test_engram_gather_uses_the_local_edp_token_slice(monkeypatch, dp_rank, num_tokens):
     """A replica pads to its own EDP slot, never to another node's prefill."""
-    from vllm.models.deepseek_v41.nvidia import engram as parallel_mod
+    from vllm.models.deepseek_v41.common import engram as parallel_mod
 
     edp_group = SimpleNamespace(world_size=2, rank_in_group=dp_rank - 2, all_gather=lambda ids, dim=0: ids.repeat(2, 1))
     monkeypatch.setattr(parallel_mod, "get_engram_dp_group", lambda: edp_group)

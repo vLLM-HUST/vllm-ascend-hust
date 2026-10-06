@@ -825,7 +825,7 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
             return_value=slot_mappings_by_layer,
         ),
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.maybe_prepare_dcp_local_seq_lens",
+            "vllm_ascend.worker.v2.aclgraph_utils.prepare_dcp_local_seq_lens",
             return_value=dcp_local_seq_lens,
         ) as prepare_dcp_local_seq_lens,
     ):
