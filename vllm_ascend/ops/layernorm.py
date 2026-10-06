@@ -24,7 +24,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_aclnn_available
 
 # Scanning quant_description is O(number of quantized tensors) and every
 # RMSNorm used to redo it. The answer is a property of the checkpoint, so
@@ -88,12 +88,16 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
-
-            enable_custom_op()
-            x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                x, residual, self.weight, self.bias, self.variance_epsilon
-            )
+            if enable_custom_op() and is_aclnn_available("AddRmsNormBias"):
+                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
+                    x, residual, self.weight, self.bias, self.variance_epsilon
+                )
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, self.weight, self.variance_epsilon
+                )
+                if self.bias_loaded:
+                    x.add_(self.bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
@@ -112,7 +116,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if enable_custom_op() and is_aclnn_available("AddRmsNormBias"):
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )

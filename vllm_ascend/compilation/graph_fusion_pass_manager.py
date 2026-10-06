@@ -50,6 +50,7 @@ class GraphFusionPassManager:
 
     def configure(self, config: VllmConfig):
         from vllm_ascend.ascend_config import get_ascend_config
+        from vllm_ascend.utils import is_aclnn_available
 
         # Consume the recursively validated config rather than re-reading the
         # raw additional_config dict (where e.g. "false" is truthy).
@@ -57,7 +58,7 @@ class GraphFusionPassManager:
         profile = get_current_hardware_profile()
         if self.ascend_compilation_config.fuse_norm_quant and profile.supports(
             HardwareCapability.GRAPH_NORM_QUANT_FUSION
-        ):
+        ) and is_aclnn_available("AddRmsNormBias"):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))

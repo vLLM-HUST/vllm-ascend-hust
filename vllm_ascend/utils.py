@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import json
 import math
@@ -78,6 +79,20 @@ _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
 _HAS_ROPE = None
+
+
+@lru_cache
+def is_aclnn_available(op_name: str) -> bool:
+    """Return whether the active CANN op-api exports an ACLNN operation."""
+    if not op_name.isidentifier():
+        raise ValueError(f"Invalid ACLNN operation name: {op_name!r}")
+    try:
+        op_api = ctypes.CDLL("libopapi.so")
+    except OSError:
+        return False
+    return hasattr(op_api, f"aclnn{op_name}") and hasattr(
+        op_api, f"aclnn{op_name}GetWorkspaceSize"
+    )
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
