@@ -56,9 +56,11 @@ class GraphFusionPassManager:
         # raw additional_config dict (where e.g. "false" is truthy).
         self.ascend_compilation_config = get_ascend_config().ascend_compilation_config
         profile = get_current_hardware_profile()
-        if self.ascend_compilation_config.fuse_norm_quant and profile.supports(
-            HardwareCapability.GRAPH_NORM_QUANT_FUSION
-        ) and is_aclnn_available("AddRmsNormBias"):
+        if (
+            self.ascend_compilation_config.fuse_norm_quant
+            and profile.supports(HardwareCapability.GRAPH_NORM_QUANT_FUSION)
+            and is_aclnn_available("AddRmsNormBias")
+        ):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))

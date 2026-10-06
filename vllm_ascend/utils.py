@@ -90,9 +90,9 @@ def is_aclnn_available(op_name: str) -> bool:
         op_api = ctypes.CDLL("libopapi.so")
     except OSError:
         return False
-    return hasattr(op_api, f"aclnn{op_name}") and hasattr(
-        op_api, f"aclnn{op_name}GetWorkspaceSize"
-    )
+    return hasattr(op_api, f"aclnn{op_name}") and hasattr(op_api, f"aclnn{op_name}GetWorkspaceSize")
+
+
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
