@@ -32,6 +32,7 @@ from vllm_ascend.utils import enable_custom_op, is_aclnn_available
 # id cannot be recycled by a later allocation, and the identity check makes a
 # stale entry harmless either way.
 _NORM_BIAS_IN_QUANT_DESCRIPTION: dict[int, tuple[dict, bool]] = {}
+_HAS_ACLNN_ADD_RMS_NORM_BIAS = is_aclnn_available("AddRmsNormBias")
 
 
 def _quant_description_has_norm_bias(quant_description: dict) -> bool:
@@ -88,7 +89,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op() and is_aclnn_available("AddRmsNormBias"):
+            if enable_custom_op() and _HAS_ACLNN_ADD_RMS_NORM_BIAS:
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -116,7 +117,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op() and is_aclnn_available("AddRmsNormBias"):
+            if enable_custom_op() and _HAS_ACLNN_ADD_RMS_NORM_BIAS:
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
