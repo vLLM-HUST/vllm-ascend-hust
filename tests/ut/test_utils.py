@@ -377,6 +377,18 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend.utils._IS_DRAFTER_MOE_MODEL", None):
             self.assertFalse(utils.is_drafter_moe_model(vllm_config))
 
+    def test_is_aclnn_available_requires_both_vendor_symbols(self):
+        op_api = mock.MagicMock(spec=["aclnnExample", "aclnnExampleGetWorkspaceSize"])
+        utils.is_aclnn_available.cache_clear()
+        with mock.patch("vllm_ascend.utils.ctypes.CDLL", return_value=op_api):
+            self.assertTrue(utils.is_aclnn_available("Example"))
+        utils.is_aclnn_available.cache_clear()
+
+        missing_workspace = mock.MagicMock(spec=["aclnnExample"])
+        with mock.patch("vllm_ascend.utils.ctypes.CDLL", return_value=missing_workspace):
+            self.assertFalse(utils.is_aclnn_available("Example"))
+        utils.is_aclnn_available.cache_clear()
+
     def test_is_drafter_moe_model_eagle_moe_drafter_detected(self):
         """Non-extract_hidden_states drafters keep the expert-key detection."""
         vllm_config = mock.MagicMock()

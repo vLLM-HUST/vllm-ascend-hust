@@ -75,6 +75,29 @@ def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_co
     assert layer.bias is None
 
 
+@patch("vllm_ascend.ops.layernorm._HAS_ACLNN_ADD_RMS_NORM_BIAS", False)
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias)
+def test_RMSNorm_falls_back_when_vendor_bias_op_is_missing(
+    mock_add_rms_norm_bias,
+    mock_add_rmsnorm,
+    _mock_enable_custom_op,
+    dummy_tensor,
+    default_vllm_config,
+):
+    default_vllm_config.quant_config = None
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+    residual = torch.randn_like(dummy_tensor)
+
+    out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    mock_add_rmsnorm.assert_called_once()
+    mock_add_rms_norm_bias.assert_not_called()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
+
+
 def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     quant_config = MagicMock()
     quant_config.quant_description = {"model.layers.0.input_layernorm.bias": "W8A8"}
