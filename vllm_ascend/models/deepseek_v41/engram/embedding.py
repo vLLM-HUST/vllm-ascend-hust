@@ -31,14 +31,22 @@ from vllm.distributed.parallel_state import get_tp_group, in_the_same_node_as
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
 
-# Upstream #56741 normalized the V4.1 model package name and later moved the
-# shared Engram helpers out of the NVIDIA implementation.
-from vllm.models.deepseek_v41.common.engram import (
-    ParallelEngramEmbedding,
-    _gather_engram_rows,
-    engram_head_shard_rank,
-    gather_engram_hashes,
-)
+# Upstream #56741 normalized the V4.1 model package name. The shared Engram
+# helpers moved out of the NVIDIA implementation in a later revision.
+from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+
+try:
+    from vllm.models.deepseek_v41.common.engram import (
+        _gather_engram_rows,
+        engram_head_shard_rank,
+        gather_engram_hashes,
+    )
+except ImportError:
+    from vllm.models.deepseek_v41.nvidia.engram import (
+        _gather_engram_rows,
+        engram_head_shard_rank,
+        gather_engram_hashes,
+    )
 
 from .npu import (
     HostUvaBuffer,
