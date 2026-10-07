@@ -466,7 +466,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: ubuntu-24.04
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
