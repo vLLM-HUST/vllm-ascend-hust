@@ -52,11 +52,12 @@ def test_mrv1_kv_pool_only_wraps_backing_allocation() -> None:
 
     runner._allocate_kv_cache_tensors = allocate
     runner._reshape_kv_cache_tensors = reshape
+    kv_cache_config = SimpleNamespace(kv_cache_groups=[])
 
     with patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=bind):
         result = NPUModelRunner.initialize_kv_cache_tensors(
             runner,
-            SimpleNamespace(),
+            kv_cache_config,
             kv_cache_allocation_context=scope,
         )
 

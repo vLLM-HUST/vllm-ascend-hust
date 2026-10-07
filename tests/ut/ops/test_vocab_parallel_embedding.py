@@ -646,7 +646,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
             result = processor._get_logits(hidden_states, replicated_head, None)
 
         self.assertEqual(result, "normal")
-        mock_normal.assert_called_once_with(hidden_states, replicated_head, None)
+        mock_normal.assert_called_once_with(hidden_states, replicated_head, None, False)
         mock_lmheadtp.assert_not_called()
 
     def test_get_logits_sharded_head_takes_lmheadtp_path(self):

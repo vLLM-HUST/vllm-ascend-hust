@@ -286,6 +286,7 @@ def test_glm5_next_initialize_passes_all_pooled_views_to_cache_binding():
         runner.compilation_config.static_forward_context,
         runner.kv_caches,
         1,
+        kv_cache_groups=plan.kv_cache_groups,
     )
 
 
