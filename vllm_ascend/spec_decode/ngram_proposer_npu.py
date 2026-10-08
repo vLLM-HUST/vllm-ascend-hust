@@ -4,7 +4,6 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 class AscendNgramProposerNPU(NgramProposerGPU):
     def __init__(self, vllm_config, device: torch.device, runner):
-        self.runner = runner
         super().__init__(vllm_config, device=device)
 
     def load_model(self, *args, **kwargs):
@@ -25,30 +24,3 @@ class AscendNgramProposerNPU(NgramProposerGPU):
         is_profile=False,
     ):
         pass
-
-    def propose(
-        self,
-        num_speculative_tokens: int,
-        num_tokens_no_spec: torch.Tensor,  # [batch_size]
-        token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
-        valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
-        valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Propose draft tokens using the upstream PyTorch ngram kernel.
-
-        Note: The model runner may bypass this method when using the AscendC
-        custom op (npu_ngram_spec_decode) for better performance on NPU. This
-        implementation ensures interface alignment with the parent class and
-        provides a working fallback via the upstream PyTorch ngram kernel.
-
-        Returns:
-            draft_tokens: [batch_size, k] tensor of proposed draft token IDs.
-            num_valid_draft_tokens: [batch_size] tensor of valid draft count.
-        """
-        return super().propose(
-            num_speculative_tokens,
-            num_tokens_no_spec,
-            token_ids_gpu,
-            valid_sampled_token_ids_gpu,
-            valid_sampled_tokens_count,
-        )
