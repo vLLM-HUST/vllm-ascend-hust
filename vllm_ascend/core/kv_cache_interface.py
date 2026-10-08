@@ -106,6 +106,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # main-cache property here; indexer-specific C8 properties belong to the
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
+    cache_sparse_sfa_turboquant: bool = False
     store_on_host: bool = False
     # Current vLLM represents compressed-state density with
     # ``tokens_per_state`` but the Ascend DSV4 kernels still dispatch on the
@@ -150,6 +151,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             return self.block_size // self.tokens_per_state
 
     @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether the SFA main cache is stored in one packed tensor."""
+        return self.cache_sparse_sfa_c8 or self.cache_sparse_sfa_turboquant
+
+    @property
     def real_page_size_bytes(self) -> int:
         return (
             get_storage_block_size(self)
@@ -171,6 +177,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dim,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
+                spec.cache_sparse_sfa_turboquant,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
@@ -197,6 +204,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+            cache_sparse_sfa_turboquant=first_spec.cache_sparse_sfa_turboquant,
             store_on_host=first_spec.store_on_host,
             compress_ratio=compress_ratio_set.pop(),
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
