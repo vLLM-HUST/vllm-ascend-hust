@@ -32,7 +32,15 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+
+try:
+    from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+except ImportError:
+    # vLLM renamed this helper after the verified main snapshot. The call
+    # signature is unchanged, and this module only invokes it for DCP/PCP.
+    from vllm.v1.worker.gpu.cp_utils import (
+        maybe_prepare_dcp_local_seq_lens as prepare_dcp_local_seq_lens,
+    )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState

@@ -22,8 +22,10 @@ def _mamba_spec(block_size: int) -> MambaSpec:
 def test_get_mamba_groups_preserves_current_core_mapping_contract() -> None:
     first = _mamba_spec(16)
     second = _mamba_spec(32)
-    wrapped = UniformTypeKVCacheSpecs.from_specs({"layer.1": first, "layer.2": second})
-    assert wrapped is not None
+    wrapped = UniformTypeKVCacheSpecs(
+        block_size=first.block_size,
+        kv_cache_specs={"layer.1": first, "layer.2": second},
+    )
     config = KVCacheConfig(
         num_blocks=1,
         kv_cache_tensors=[],

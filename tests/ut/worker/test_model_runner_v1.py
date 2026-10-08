@@ -488,7 +488,11 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.use_compress = True
         runner._has_gdn = False
         # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+        runner.parallel_config = SimpleNamespace(data_parallel_size=1)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=None),
+            parallel_config=runner.parallel_config,
+        )
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
@@ -688,7 +692,11 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.drafter = None
         # _dummy_run reads multimodal_config for the mm_encoder_only
         # early-exit; keep it real so the forward path is not skipped.
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+        runner.parallel_config = SimpleNamespace(data_parallel_size=1)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=None),
+            parallel_config=runner.parallel_config,
+        )
         runner.model = MagicMock()
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
@@ -1110,7 +1118,10 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.requests = {}
                 runner.mamba_state_idx = {}
                 runner.num_spec_tokens = 3
-                with patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all") as postprocess_all:
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all",
+                    create=True,
+                ) as postprocess_all:
                     runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
                 np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
                 np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])

@@ -73,6 +73,7 @@ def _build_weight_layer():
 
 def _build_apply_layer():
     return SimpleNamespace(
+        moe_config=SimpleNamespace(num_experts=4),
         w13_weight=nn.Parameter(torch.randn(4, 3, 8)),
         w2_weight=nn.Parameter(torch.randn(4, 8, 3)),
         w13_bias=None,

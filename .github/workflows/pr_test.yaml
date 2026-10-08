@@ -318,6 +318,7 @@ jobs:
       vllm: ${{ matrix.vllm }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ github.event.pull_request.base.sha }}
       test_groups: >-
         [{"partition_name":"cpu-ut","runner":"ubuntu-24.04","image_tag":"9.2.0_20260928212200-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
@@ -465,7 +466,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
       }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: ubuntu-24.04
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:

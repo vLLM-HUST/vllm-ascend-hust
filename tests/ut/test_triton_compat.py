@@ -14,6 +14,13 @@ compat = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(compat)
 
 
+def test_cpu_runtime_mock_preserves_real_package_hierarchy():
+    runtime = importlib.import_module("triton.runtime")
+
+    assert hasattr(runtime, "__path__")
+    assert importlib.import_module("triton.runtime.jit") is not None
+
+
 @pytest.fixture(autouse=True)
 def isolate_gluon_modules(monkeypatch: pytest.MonkeyPatch):
     original = {

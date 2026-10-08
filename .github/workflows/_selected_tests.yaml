@@ -369,12 +369,20 @@ jobs:
           uv pip install -r /tmp/requirements-dev-cpu.txt
           FLA_WHL=flash_linear_attention_npu_a3-26.9.1+deva4a7958-py3-none-manylinux_2_34_x86_64.whl
           FLA_SHA256=da53bc5cd19fc7968c38c3b2684910012243ee9c1ae20cbc86a9667626614ff9
-          FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
+          FLA_ORIGIN_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
+          FLA_DOWNLOAD_URL="$FLA_ORIGIN_URL"
           if [ -n "${GIT_PROXY:-}" ]; then
-            FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
+            FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_ORIGIN_URL}"
           fi
-          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-            "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"
+          if ! curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
+            "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"; then
+            if [ "$FLA_DOWNLOAD_URL" = "$FLA_ORIGIN_URL" ]; then
+              exit 1
+            fi
+            echo "::warning::FLA proxy download failed; retrying the checksum-pinned origin URL."
+            curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
+              "$FLA_ORIGIN_URL" -o "/tmp/$FLA_WHL"
+          fi
           echo "$FLA_SHA256  /tmp/$FLA_WHL" | sha256sum --check
           uv pip install --no-deps "/tmp/$FLA_WHL"
           rm -f "/tmp/$FLA_WHL"
