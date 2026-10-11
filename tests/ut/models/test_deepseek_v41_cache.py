@@ -163,8 +163,8 @@ def test_owner_counts_nested_config_and_source_resolution(config, runtime):
     assert topology.kv_consumers(20) == tuple(range(20, 40))
     assert topology.layer(26).kv_source_layer == 20
     assert topology.layer(26).index_source_layer == 24
-    assert specs["model.layers.20.self_attn.long_kv_cache"].storage_block_size == 64
-    assert specs["model.layers.2.self_attn.long_kv_cache"].storage_block_size == 32
+    assert get_storage_block_size(specs["model.layers.20.self_attn.long_kv_cache"]) == 64
+    assert get_storage_block_size(specs["model.layers.2.self_attn.long_kv_cache"]) == 32
     assert "model.layers.20.self_attn.compressor.state_cache" not in specs
     assert type(specs["model.layers.2.self_attn.long_kv_cache"]) is AscendMLAAttentionSpec
     assert type(specs["model.layers.2.self_attn.indexer.k_cache"]) is AscendMLAAttentionSpec
@@ -405,7 +405,7 @@ def test_upstream_entrypoint_and_admission_use_slot_reservation(runtime):
     assert config.num_blocks == 100 and len(config.kv_cache_tensors) == 4
     assert sum(t.size for t in config.kv_cache_tensors) == 100 * page
     demand = kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) // page
-    assert kv_cache_utils._pool_bytes_per_block(groups) == page
+    assert kv_cache_utils._pool_bytes_per_block(runtime, groups) == page
     assert kv_cache_utils._max_memory_usage_bytes_from_groups(runtime, groups) == demand * page
     assert kv_cache_utils.get_max_concurrency_for_kv_cache_config(runtime, config) == 100 / demand
     scheduler_config = kv_cache_utils.generate_scheduler_kv_cache_config([config])

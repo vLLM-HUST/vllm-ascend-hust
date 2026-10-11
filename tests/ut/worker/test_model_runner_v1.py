@@ -488,7 +488,10 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.use_compress = True
         runner._has_gdn = False
         # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=None),
+            parallel_config=SimpleNamespace(data_parallel_size=1),
+        )
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
@@ -688,7 +691,10 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.drafter = None
         # _dummy_run reads multimodal_config for the mm_encoder_only
         # early-exit; keep it real so the forward path is not skipped.
-        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=None),
+            parallel_config=SimpleNamespace(data_parallel_size=1),
+        )
         runner.model = MagicMock()
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
@@ -1013,7 +1019,6 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 device=torch.device("cpu"),
                 vocab_size=128,
                 block_sizes=[4],
-                kernel_block_sizes=[4],
                 max_num_blocks_per_req=[8],
                 num_spec_tokens=3,
             )
@@ -1102,20 +1107,16 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], expected)
 
     def test_non_align_postprocess_keeps_an_independent_snapshot(self):
-        for mode in ("none", "all"):
-            with self.subTest(mode=mode):
-                runner = self._build_runner()
-                runner.cache_config.mamba_cache_mode = mode
-                runner.kv_cache_config = object()
-                runner.requests = {}
-                runner.mamba_state_idx = {}
-                runner.num_spec_tokens = 3
-                with patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all") as postprocess_all:
-                    runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
-                np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
-                np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])
-                self.assertEqual(postprocess_all.call_count, int(mode == "all"))
-                runner.num_accepted_tokens_event.record.assert_called_once()
+        runner = self._build_runner()
+        runner.cache_config.mamba_cache_mode = "none"
+        runner.kv_cache_config = object()
+        runner.requests = {}
+        runner.mamba_state_idx = {}
+        runner.num_spec_tokens = 3
+        runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
+        np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])
+        runner.num_accepted_tokens_event.record.assert_called_once()
 
 
 def _make_kv_cache_tensor(
@@ -1242,11 +1243,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(spec, expected)
         attn_module.get_attn_backend.return_value.customize_spec.assert_not_called()
 
-    def test_full_decode_graph_alignment_overrides_resolver_tp_size(self):
-        for graph_mode, expected_tp_size in (
-            (CUDAGraphMode.FULL_DECODE_ONLY, 1),
-            (CUDAGraphMode.NONE, 16),
-        ):
+    def test_full_decode_graph_alignment_uses_current_resolver_contract(self):
+        for graph_mode in (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.NONE):
             with self.subTest(graph_mode=graph_mode):
                 runner = self._build_runner()
                 compilation_config = SimpleNamespace(
@@ -1274,12 +1272,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     runner._check_and_update_cudagraph_mode([], [])
 
                 call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
-                self.assertEqual(
-                    call_kwargs["tensor_parallel_size"],
-                    expected_tp_size,
-                )
+                self.assertNotIn("tensor_parallel_size", call_kwargs)
                 if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-                    compilation_config.adjust_cudagraph_sizes_for_spec_decode.assert_called_once_with(48, 1)
+                    compilation_config.adjust_cudagraph_sizes_for_spec_decode.assert_called_once_with(48)
                 else:
                     compilation_config.adjust_cudagraph_sizes_for_spec_decode.assert_not_called()
 

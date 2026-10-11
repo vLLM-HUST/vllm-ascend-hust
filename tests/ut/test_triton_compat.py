@@ -45,7 +45,11 @@ def test_modern_triton_loads_real_gluon_without_stubs(monkeypatch: pytest.Monkey
 
     compat.ensure_gluon_compatibility()
 
-    assert loaded == ["triton.experimental.gluon", "triton.experimental.gluon.language"]
+    assert loaded == [
+        "triton.experimental.gluon",
+        "triton.experimental.gluon.language",
+        "triton.experimental.gluon.nvidia",
+    ]
 
 
 def test_legacy_triton_gets_complete_parent_child_hierarchy(monkeypatch: pytest.MonkeyPatch):
@@ -78,3 +82,15 @@ def test_missing_triton_version_metadata_uses_legacy_compat(monkeypatch: pytest.
     monkeypatch.setattr(compat.importlib.metadata, "version", lambda _name: None)
 
     assert compat._triton_version() is None
+
+
+def test_official_ascend_distribution_name_is_detected(monkeypatch: pytest.MonkeyPatch):
+    def version(name: str):
+        if name == "triton":
+            raise compat.importlib.metadata.PackageNotFoundError(name)
+        assert name == "triton-ascend"
+        return "3.6.0.dev0+dev20261008"
+
+    monkeypatch.setattr(compat.importlib.metadata, "version", version)
+
+    assert compat._triton_version() == compat.Version("3.6.0.dev0+dev20261008")

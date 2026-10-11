@@ -395,7 +395,7 @@ class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
         return AscendC8MXFPMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [512]
 
 
@@ -812,7 +812,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: list[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         slot_mapping: torch.Tensor,
     ) -> None:
         raise NotImplementedError("C8_MXFP KV cache update is only supported via reshape_and_cache in forward().")

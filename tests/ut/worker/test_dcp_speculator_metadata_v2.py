@@ -11,7 +11,15 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (  # type: ignore[import-not-found]
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
+        AutoRegressiveSpeculator,
+    )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
@@ -81,6 +89,9 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         spec.model_state = object()
     spec.attn_architecture = architecture
     spec.use_dcp = use_dcp
+    # Current vLLM caches this value during Speculator.__init__. These tests
+    # intentionally bypass the constructor, so mirror the initialized state.
+    spec.dcp_size = config.parallel_config.decode_context_parallel_size
     spec.dcp_manager = manager
     spec.max_model_len = 128
     spec.draft_max_seq_len = 128
@@ -120,6 +131,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     spec.kv_cache_config = SimpleNamespace(kv_cache_groups=[None])
 
     class RecordingBuilder:
+        supports_update_block_table = False
+
         def build(self, common_prefix_len, common_attn_metadata):
             common = common_attn_metadata
             decode = FakeDecodeMetadata(common.query_start_loc_cpu[1:].tolist())
@@ -133,8 +146,15 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
                 seq_lens_cpu = common.seq_lens
             return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
 
+    builder = RecordingBuilder()
     spec.attn_groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: RecordingBuilder(), layer_names=["draft.layer"])]
+        [
+            SimpleNamespace(
+                get_metadata_builder=lambda _: builder,
+                build_metadata=lambda common, _ubatch_idx: builder.build(0, common),
+                layer_names=["draft.layer"],
+            )
+        ]
     ]
 
     def prepare_device(out, seq_lens, num_reqs, size, rank, interleave):
@@ -177,7 +197,7 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        assert common.is_prefilling.tolist() == [False, False]
+        assert common.is_prefilling.tolist() == [False] * padded
     else:
         expected = [31 + width, 128] + [0] * (padded - 2)
         assert common.seq_lens_cpu.tolist() == expected

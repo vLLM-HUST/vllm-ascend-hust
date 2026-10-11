@@ -8,7 +8,15 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as ar_speculator
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
+        speculator as ar_speculator,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import (
+        speculator as ar_speculator,
+    )
 
 from vllm_ascend._310p.worker.v2.spec_utils import (
     prepare_decode_inputs_cpu,

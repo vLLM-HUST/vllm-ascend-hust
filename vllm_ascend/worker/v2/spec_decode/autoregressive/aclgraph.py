@@ -17,7 +17,15 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found, no-redef]
+        SpeculatorCudaGraphManager,
+    )
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX

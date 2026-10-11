@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -964,11 +965,12 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LHBNC,
         )
     )
 
-    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
+    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 

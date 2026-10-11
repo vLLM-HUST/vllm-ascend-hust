@@ -35,7 +35,15 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (  # type: ignore[import-not-found]
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found, no-redef]
+        AutoRegressiveSpeculator,
+    )
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config

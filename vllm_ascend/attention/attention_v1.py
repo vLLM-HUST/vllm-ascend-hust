@@ -171,7 +171,7 @@ class AscendAttentionBackend(AttentionBackend):
                 cache[dst_indices] = cache[src_indices]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
         return [128]
 
 
