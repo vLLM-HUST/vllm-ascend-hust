@@ -8,7 +8,15 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (  # type: ignore[import-not-found]
+        TargetDependentARSpeculator as AutoRegressiveSpeculator,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
+        AutoRegressiveSpeculator,
+    )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend

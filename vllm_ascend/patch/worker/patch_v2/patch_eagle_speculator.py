@@ -16,7 +16,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as vllm_speculator_module
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (  # type: ignore[import-not-found]
+        speculator as vllm_speculator_module,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found, no-redef]
+        speculator as vllm_speculator_module,
+    )
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
 

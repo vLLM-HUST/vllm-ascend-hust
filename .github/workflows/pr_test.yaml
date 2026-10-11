@@ -235,7 +235,18 @@ jobs:
           pip install uv
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
+          if ! uv pip install -r requirements-dev.txt; then
+            # The 3.6 wheel is hosted only by the internal cache. Keep the
+            # public fallback lint-only instead of weakening runtime pins.
+            sed 's/^triton-ascend==3.6.0$/triton-ascend==3.2.2/' \
+              requirements.txt > /tmp/requirements-public.txt
+            tail -n +3 requirements-dev.txt > /tmp/requirements-dev-extra.txt
+            UV_INDEX_URL=https://pypi.org/simple \
+              UV_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu" \
+              uv pip install -r requirements-lint.txt \
+                -r /tmp/requirements-public.txt \
+                -r /tmp/requirements-dev-extra.txt
+          fi
 
       - name: Install vllm-ascend dev from public indexes (upstream sync)
         if: ${{ steps.filter.outputs.lint_tracker == 'true' && contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}

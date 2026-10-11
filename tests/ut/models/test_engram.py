@@ -20,7 +20,7 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm.models.deepseek_v41.nvidia import engram as upstream_engram
+from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu

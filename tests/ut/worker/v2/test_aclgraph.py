@@ -8,7 +8,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import SpeculatorCudaGraphManager
+
+try:
+    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
+except ImportError:
+    from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (  # type: ignore[import-not-found]
+        SpeculatorCudaGraphManager,
+    )
 
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import (
     AutoRegressiveAclGraphManager,
@@ -172,7 +180,7 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
     manager.speculator = object()
     manager.is_draft_model_prefill = False
     manager.max_num_reqs = 3
-    manager.dp_size = 2
+    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=2))
     forward_fn = MagicMock()
     model_state = object()
     input_buffers = SimpleNamespace(seq_lens_cpu=torch.tensor([10, 20, 30], dtype=torch.int32))

@@ -1021,16 +1021,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
-            if self.cache_config.mamba_cache_mode == "all":
-                mamba_utils.postprocess_mamba_all(
-                    scheduler_output,
-                    self.kv_cache_config,
-                    self.input_batch,
-                    self.requests,
-                    self.mamba_state_idx,
-                    self.num_spec_tokens,
-                    num_reqs,
-                )
         assert self.num_accepted_tokens_event is not None
         self.num_accepted_tokens_event.record()
 
@@ -6105,7 +6095,11 @@ class NPUModelRunner(GPUModelRunner):
                     )
                 )
                 attn_group = AttentionGroup(
-                    attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
+                    attn_backend,
+                    layer_names,
+                    kv_cache_spec,
+                    kv_cache_group_id,
+                    metadata_builders=attn_metadata_builders,
                 )
                 attn_groups.append(attn_group)
             return attn_groups
@@ -6362,7 +6356,11 @@ class NPUModelRunner(GPUModelRunner):
         """
         return (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and (enable_dsa_cp() or enable_sp(self.vllm_config) or self.compilation_config.pass_config.enable_sp)
+            and (
+                enable_dsa_cp()
+                or enable_sp(self.vllm_config)
+                or getattr(self.compilation_config.pass_config, "enable_sp", False)
+            )
         )
 
     def _check_and_update_cudagraph_mode(
@@ -6387,17 +6385,14 @@ class NPUModelRunner(GPUModelRunner):
 
         with update_pass_config(self):
             tensor_parallel_size = self.parallel_config.tensor_parallel_size
-            resolver_tensor_parallel_size = tensor_parallel_size
             if self._should_align_cudagraph_capture_sizes():
                 graph_alignment = math.lcm(self.uniform_decode_query_len, tensor_parallel_size)
-                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment, 1)
-                resolver_tensor_parallel_size = 1
+                self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(graph_alignment)
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
             )
@@ -6592,9 +6587,16 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
 
 @contextmanager
 def update_pass_config(model_runner):
+    pass_config = model_runner.compilation_config.pass_config
+    if not hasattr(pass_config, "enable_sp"):
+        # Current vLLM removed this backend-specific pass flag. Ascend still
+        # derives sequence-parallel behavior from its VllmConfig, so there is
+        # nothing to override on the upstream PassConfig object.
+        yield
+        return
+    original_pass_config_sp = pass_config.enable_sp
     try:
-        original_pass_config_sp = model_runner.compilation_config.pass_config.enable_sp
-        model_runner.compilation_config.pass_config.enable_sp = enable_sp(model_runner.vllm_config)
+        pass_config.enable_sp = enable_sp(model_runner.vllm_config)
         yield
     finally:
-        model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
+        pass_config.enable_sp = original_pass_config_sp
