@@ -15,8 +15,12 @@
 # limitations under the License.
 #
 
+import builtins
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -32,6 +36,26 @@ from vllm_ascend.ops.gdn import (
     _get_packed_conv_weights,
     initialize_packed_conv_weight,
 )
+
+
+def test_gdn_import_defers_optional_fla_npu(monkeypatch):
+    """Non-GDN models must load the worker patch without fla_npu installed."""
+    original_import = builtins.__import__
+
+    def without_fla_npu(name, *args, **kwargs):
+        if name == "fla_npu" or name.startswith("fla_npu."):
+            raise ModuleNotFoundError(name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_fla_npu)
+    gdn_source = Path(__file__).resolve().parents[3] / "vllm_ascend" / "ops" / "gdn.py"
+    spec = importlib.util.spec_from_file_location("vllm_ascend.ops._gdn_without_fla", gdn_source)
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+
+    with pytest.raises(ModuleNotFoundError, match="fla_npu"):
+        probe.causal_conv1d_fn()
 
 
 class _RecordingQuantMethod(QuantizeMethodBase):
