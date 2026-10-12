@@ -47,16 +47,16 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.context_parallel.common_cp import (
+    get_pcp_num_replicated_tokens,
+    is_pcp_decode_sharding_enabled,
+)
 from vllm_ascend.attention.continuing_prefill import (
     C8ContinuingPrefillProvider,
     C8ContinuingPrefillProviderConfig,
     C8ContinuingPrefillRequest,
     C8ContinuingPrefillResult,
     load_c8_continuing_prefill_provider,
-)
-from vllm_ascend.attention.context_parallel.common_cp import (
-    get_pcp_num_replicated_tokens,
-    is_pcp_decode_sharding_enabled,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
