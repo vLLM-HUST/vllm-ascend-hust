@@ -48,7 +48,7 @@ if not _npu_available:
     if importlib.util.find_spec("triton") is not None:
         # Keep the real runtime package importable: modern Gluon imports
         # triton.runtime.jit during plugin discovery. Mock only its driver.
-        import triton.runtime
+        import triton.runtime  # type: ignore[import-untyped]
 
         triton.runtime.driver = triton_runtime_driver
     else:
