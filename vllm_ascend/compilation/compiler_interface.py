@@ -38,17 +38,17 @@ from vllm_ascend.utils import COMPILATION_PASS_KEY
 
 
 @contextmanager
-def _disable_pytorch_aot_cache_for_npugraph_ex():
-    """Disable PyTorch cache formats that npugraph_ex cannot serialize.
+def _disable_pytorch_aot_cache_for_non_inductor_backend():
+    """Disable PyTorch cache formats that Ascend backends cannot serialize.
 
     PyTorch 2.13 enables bundled AOTAutograd caching while vLLM performs its
-    precompile pass.  Bundling requires every backend compiler to return an
-    ``OutputCode`` instance.  The torch-npu npugraph_ex backend intentionally
-    returns its own ``_CompiledFxGraph`` callable instead, so attempting to
-    bundle that result raises an assertion before model initialization.
+    precompile pass. Bundling requires every backend compiler to return an
+    ``OutputCode`` instance. The fusion-pass backend returns an FX GraphModule,
+    while torch-npu npugraph_ex returns its own ``_CompiledFxGraph`` callable.
+    Neither output can be bundled by PyTorch's Inductor-specific cache.
 
-    npugraph_ex already owns its graph cache below.  Keep the workaround scoped
-    to its backend invocation and restore every PyTorch setting afterwards.
+    npugraph_ex already owns its graph cache below. Keep the workaround scoped
+    to each backend invocation and restore every PyTorch setting afterwards.
     Older PyTorch versions do not expose all of these settings, hence the
     feature checks.
     """
@@ -94,12 +94,13 @@ def fusion_pass_compile(
 
     decompositions = select_decomp_table()
 
-    compiled_fn = compile_fx(
-        graph=graph,
-        example_inputs=example_inputs,
-        inner_compile=compile_inner,
-        decompositions=decompositions,
-    )
+    with _disable_pytorch_aot_cache_for_non_inductor_backend():
+        compiled_fn = compile_fx(
+            graph=graph,
+            example_inputs=example_inputs,
+            inner_compile=compile_inner,
+            decompositions=decompositions,
+        )
 
     return compiled_fn, None
 
@@ -242,7 +243,7 @@ def npugraph_ex_compile(
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         backend = nge.get_npu_backend(compiler_config=config)
-        with _disable_pytorch_aot_cache_for_npugraph_ex():
+        with _disable_pytorch_aot_cache_for_non_inductor_backend():
             # torch.compile requires the output of the fx graph to be a tuple
             if not graph_returns_tuple(graph):
                 compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)

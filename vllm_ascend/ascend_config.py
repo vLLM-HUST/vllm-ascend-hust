@@ -938,7 +938,7 @@ class AscendConfig:
         self.enable_sp_by_pass = (
             vc.model_config is not None
             and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
+            and getattr(vc.compilation_config.pass_config, "enable_sp", False)
         )
 
         self._validate_mc2_comm_alg(vc)

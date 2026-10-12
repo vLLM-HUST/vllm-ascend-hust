@@ -40,12 +40,20 @@ except (subprocess.CalledProcessError, FileNotFoundError):
     _npu_available = False
 
 if not _npu_available:
-    triton_runtime = MagicMock()
-    triton_runtime.driver.active.utils.get_device_properties.return_value = {
+    triton_runtime_driver = MagicMock()
+    triton_runtime_driver.active.utils.get_device_properties.return_value = {
         "num_aic": 8,
         "num_vectorcore": 8,
     }
-    sys.modules["triton.runtime"] = triton_runtime
+    if importlib.util.find_spec("triton") is not None:
+        # Keep the real runtime package importable: modern Gluon imports
+        # triton.runtime.jit during plugin discovery. Mock only its driver.
+        import triton.runtime  # type: ignore[import-untyped]
+
+        triton.runtime.driver = triton_runtime_driver
+    else:
+        triton_runtime = MagicMock(driver=triton_runtime_driver)
+        sys.modules["triton.runtime"] = triton_runtime
     torch_npu = types.ModuleType("torch_npu")
     torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
     torch_npu.__path__ = []

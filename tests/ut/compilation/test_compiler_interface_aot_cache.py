@@ -14,12 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import patch
+
 import torch
 
-from vllm_ascend.compilation.compiler_interface import _disable_pytorch_aot_cache_for_npugraph_ex
+from vllm_ascend.compilation.compiler_interface import (
+    _disable_pytorch_aot_cache_for_non_inductor_backend,
+    fusion_pass_compile,
+)
 
 
-def test_npugraph_ex_aot_cache_settings_are_scoped():
+def test_non_inductor_aot_cache_settings_are_scoped():
     dynamo_config = torch._dynamo.config
     functorch_config = torch._functorch.config
     original = {
@@ -37,7 +42,7 @@ def test_npugraph_ex_aot_cache_settings_are_scoped():
             enable_autograd_cache=True,
         ),
     ):
-        with _disable_pytorch_aot_cache_for_npugraph_ex():
+        with _disable_pytorch_aot_cache_for_non_inductor_backend():
             assert dynamo_config.caching_precompile is False
             assert functorch_config.bundled_autograd_cache is False
             assert functorch_config.force_autograd_cache is False
@@ -52,3 +57,30 @@ def test_npugraph_ex_aot_cache_settings_are_scoped():
     assert functorch_config.bundled_autograd_cache == original["bundled_autograd_cache"]
     assert functorch_config.force_autograd_cache == original["force_autograd_cache"]
     assert functorch_config.enable_autograd_cache == original["enable_autograd_cache"]
+
+
+def test_fusion_pass_compiles_without_inductor_aot_cache():
+    dynamo_config = torch._dynamo.config
+    functorch_config = torch._functorch.config
+
+    def check_compile_settings(**_kwargs):
+        assert dynamo_config.caching_precompile is False
+        assert functorch_config.bundled_autograd_cache is False
+        assert functorch_config.force_autograd_cache is False
+        assert functorch_config.enable_autograd_cache is False
+        return object()
+
+    with (
+        dynamo_config.patch(caching_precompile=True),
+        functorch_config.patch(
+            bundled_autograd_cache=True,
+            force_autograd_cache=True,
+            enable_autograd_cache=True,
+        ),
+        patch("vllm_ascend.compilation.compiler_interface.compile_fx", side_effect=check_compile_settings),
+    ):
+        compiled, handle = fusion_pass_compile(object(), [], {}, None)
+        assert compiled is not None
+        assert handle is None
+        assert dynamo_config.caching_precompile is True
+        assert functorch_config.bundled_autograd_cache is True
