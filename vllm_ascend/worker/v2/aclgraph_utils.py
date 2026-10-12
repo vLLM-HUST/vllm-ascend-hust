@@ -30,9 +30,8 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu import cudagraph_utils
+from vllm.v1.worker.gpu import cp_utils, cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -52,6 +51,12 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+# The host renamed this helper without changing its call contract. Keep both
+# supported host snapshots importable, but do not silently omit DCP metadata.
+prepare_dcp_local_seq_lens = getattr(cp_utils, "prepare_dcp_local_seq_lens", None)
+if prepare_dcp_local_seq_lens is None:
+    prepare_dcp_local_seq_lens = getattr(cp_utils, "maybe_prepare_dcp_local_seq_lens", None)
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -83,8 +88,10 @@ def _prepare_pcp_inputs_to_capture(
     slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
-    input_batch.dcp_local_seq_lens = (
-        prepare_dcp_local_seq_lens(
+    if _block_tables.cp_size > 1:
+        if prepare_dcp_local_seq_lens is None:
+            raise RuntimeError("The vLLM host does not provide a DCP local sequence length helper")
+        input_batch.dcp_local_seq_lens = prepare_dcp_local_seq_lens(
             input_buffers.dcp_local_seq_lens,
             input_batch.seq_lens,
             input_batch.num_reqs,
@@ -93,9 +100,8 @@ def _prepare_pcp_inputs_to_capture(
             _block_tables.cp_interleave,
             num_reqs_padded=input_batch.num_reqs_after_padding,
         )
-        if _block_tables.cp_size > 1
-        else None
-    )
+    else:
+        input_batch.dcp_local_seq_lens = None
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
