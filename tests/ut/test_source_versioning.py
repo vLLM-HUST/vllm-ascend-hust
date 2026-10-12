@@ -67,3 +67,15 @@ def test_fastapi_constraint_overlaps_verified_core() -> None:
     assert Version("0.133.0") in fastapi.specifier
     assert Version("0.136.0") in fastapi.specifier
     assert Version("0.137.0") not in fastapi.specifier
+
+
+def test_transformers_pin_matches_verified_core() -> None:
+    requirements = [
+        Requirement(line)
+        for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    transformers = next(item for item in requirements if item.name == "transformers")
+
+    assert Version("5.19.0") in transformers.specifier
+    assert Version("5.14.1") not in transformers.specifier

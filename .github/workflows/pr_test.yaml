@@ -235,7 +235,18 @@ jobs:
           pip install uv
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
-          uv pip install -r requirements-dev.txt
+          if ! uv pip install -r requirements-dev.txt; then
+            # The 3.6 wheel is hosted only by the internal cache. Keep the
+            # public fallback lint-only instead of weakening runtime pins.
+            sed 's/^triton-ascend==3.6.0$/triton-ascend==3.2.2/' \
+              requirements.txt > /tmp/requirements-public.txt
+            tail -n +3 requirements-dev.txt > /tmp/requirements-dev-extra.txt
+            UV_INDEX_URL=https://pypi.org/simple \
+              UV_EXTRA_INDEX_URL="https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu" \
+              uv pip install -r requirements-lint.txt \
+                -r /tmp/requirements-public.txt \
+                -r /tmp/requirements-dev-extra.txt
+          fi
 
       - name: Install vllm-ascend dev from public indexes (upstream sync)
         if: ${{ steps.filter.outputs.lint_tracker == 'true' && contains(github.event.pull_request.labels.*.name, 'upstream-sync') }}
@@ -301,15 +312,25 @@ jobs:
           done
 
   cpu-ut:
+    # Always run tests/ut twice in parallel: once on the verified vLLM main
+    # commit and once on the matched release tag. Independent of the
+    # main2main label, which only widens the NPU matrix.
+    name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
     if: ${{ needs.pre-commit.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ needs.pre-commit.outputs.main_commit }}
+      vllm: ${{ matrix.vllm }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: >-
-        [{"partition_name":"cpu-ut","runner":"ubuntu-24.04","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+        [{"partition_name":"cpu-ut","runner":"ubuntu-24.04","image_tag":"9.2.0_20260928212200-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
       use_public_indexes: true
       skip_rebase: true

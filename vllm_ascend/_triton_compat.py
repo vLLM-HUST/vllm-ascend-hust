@@ -10,17 +10,28 @@ from typing import Any, cast
 
 from packaging.version import InvalidVersion, Version
 
-_REAL_GLUON_MIN_VERSION = Version("3.6")
+# Triton-Ascend publishes development wheels ahead of the matching upstream
+# final release. They already contain the real Gluon hierarchy, even though
+# PEP 440 orders ``3.6.0.dev*`` before ``3.6``.
+_REAL_GLUON_MIN_VERSION = Version("3.6.0.dev0")
 
 
 def _triton_version() -> Version | None:
-    try:
-        version = importlib.metadata.version("triton")
+    # Official Ascend wheels publish the distribution as ``triton-ascend``
+    # while providing the same top-level ``triton`` package. Check both names
+    # so a valid 3.6 wheel is not mistaken for a legacy installation.
+    for distribution in ("triton", "triton-ascend"):
+        try:
+            version = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
         if not isinstance(version, str):
-            return None
-        return Version(version)
-    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
-        return None
+            continue
+        try:
+            return Version(version)
+        except InvalidVersion:
+            continue
+    return None
 
 
 def _install_legacy_gluon_stubs() -> None:
@@ -67,6 +78,11 @@ def ensure_gluon_compatibility() -> None:
         # hide an ABI/package error until the first compiled kernel.
         importlib.import_module("triton.experimental.gluon")
         importlib.import_module("triton.experimental.gluon.language")
+        # Triton's native argument specializer resolves tensor types through
+        # this backend module.  Loading it only after the first kernel is
+        # bound is too late and surfaces as a misleading ModuleNotFoundError,
+        # even though the module is present in a valid Triton 3.6 install.
+        importlib.import_module("triton.experimental.gluon.nvidia")
         return
 
     _install_legacy_gluon_stubs()
