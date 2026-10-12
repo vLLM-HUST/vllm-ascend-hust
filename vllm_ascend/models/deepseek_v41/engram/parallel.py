@@ -9,18 +9,31 @@ metadata synchronization, so hash gathering must retain its fixed-slot path.
 import torch
 import torch.distributed as dist
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_dp_group, get_engram_dp_group, get_engram_dp_size
+from vllm.distributed import (
+    get_dp_group,
+    get_engram_dp_group,
+    get_engram_dp_size,
+    get_tensor_model_parallel_rank,
+)
 from vllm.forward_context import get_forward_context
 
 # Upstream #56741 normalized the V4.1 model package name.
-from vllm.models.deepseek_v41.common.engram import (
-    DEAD_ID,
-)
-from vllm.models.deepseek_v41.common.engram import (
-    engram_head_shard_rank as engram_head_shard_rank,
-)
+from vllm.models.deepseek_v41.common import engram as host_engram
 
 from vllm_ascend.utils import get_potential_max_tokens, is_pd_decode_recompute_scheduler_enabled
+
+DEAD_ID = host_engram.DEAD_ID
+
+
+def engram_head_shard_rank() -> int:
+    """Keep the host's TP-major EDP shard order on older host snapshots."""
+    host_rank = getattr(host_engram, "engram_head_shard_rank", None)
+    if host_rank is not None:
+        return host_rank()
+    dp_group = get_engram_dp_group()
+    dp_size = dp_group.world_size if dp_group is not None else 1
+    dp_rank = dp_group.rank_in_group if dp_group is not None else 0
+    return get_tensor_model_parallel_rank() * dp_size + dp_rank
 
 
 def resolve_dp_shared_memory(requested: bool) -> bool:
