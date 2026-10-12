@@ -20,11 +20,6 @@ from functools import lru_cache, wraps
 import torch
 import torch_npu
 from einops import rearrange
-from fla_npu.ops.ascendc import (
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    recurrent_gated_delta_rule,
-)
 from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -52,6 +47,35 @@ from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+@lru_cache(maxsize=1)
+def _get_fla_ops():
+    # The worker patch imports GDN for every model, including models that do
+    # not use FLA. Resolve these optional kernels only when GDN executes.
+    from fla_npu.ops.ascendc import (
+        causal_conv1d_fn as conv1d_fn,
+    )
+    from fla_npu.ops.ascendc import (
+        causal_conv1d_update as conv1d_update,
+    )
+    from fla_npu.ops.ascendc import (
+        recurrent_gated_delta_rule as recurrent_delta_rule,
+    )
+
+    return conv1d_fn, conv1d_update, recurrent_delta_rule
+
+
+def causal_conv1d_fn(*args, **kwargs):
+    return _get_fla_ops()[0](*args, **kwargs)
+
+
+def causal_conv1d_update(*args, **kwargs):
+    return _get_fla_ops()[1](*args, **kwargs)
+
+
+def recurrent_gated_delta_rule(*args, **kwargs):
+    return _get_fla_ops()[2](*args, **kwargs)
 
 
 @lru_cache(maxsize=1)
