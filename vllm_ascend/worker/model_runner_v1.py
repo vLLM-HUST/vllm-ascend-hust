@@ -1291,6 +1291,9 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+        from vllm.plugins.native_block_table_observer import observe_block_table_upload
+
+        observe_block_table_upload(self, scheduler_output)
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -2496,6 +2499,9 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_runtime_mode=cudagraph_mode,
                     batch_descriptor=batch_desc,
                 )
+
+                from vllm.plugins.native_attention_operator_observer import bind_actual_input_batch
+                bind_actual_input_batch(self, attn_metadata, eager=cudagraph_mode == CUDAGraphMode.NONE)
 
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,

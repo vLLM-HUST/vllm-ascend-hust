@@ -189,6 +189,7 @@ class BaseDeviceAdaptor:
         head_size: int,
         scale: float,
         is_prefill_no_cache: bool,
+        native_layer_name: str | None = None,
         **kwargs,
     ):
         # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
@@ -214,14 +215,14 @@ class BaseDeviceAdaptor:
             key = key.contiguous()
             value = value.contiguous()
 
-        return torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key,
-            value=value,
-            num_key_value_heads=num_key_value_heads,
-            num_heads=num_heads,
-            scale=scale,
-            **kwargs,
+        from vllm.plugins.native_attention_operator_observer import observe_native_call
+        return observe_native_call(
+            'torch_npu.npu_fused_infer_attention_score',
+            torch_npu.npu_fused_infer_attention_score, dict(
+            query=query, key=key, value=value,
+            num_key_value_heads=num_key_value_heads, num_heads=num_heads,
+            scale=scale, **kwargs,
+            ), metadata=attn_metadata, layer_name=native_layer_name,
         )
 
     @staticmethod
@@ -1067,6 +1068,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         head_size: int,
         scale: float,
         is_prefill_no_cache: bool,
+        native_layer_name: str | None = None,
         **kwargs,
     ):
         if kwargs.get("block_table") is None:

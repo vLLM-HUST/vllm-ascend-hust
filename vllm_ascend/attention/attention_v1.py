@@ -1066,6 +1066,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     head_size=self.head_size,
+                    native_layer_name=self._layer_name,
                     scale=self.scale,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
@@ -1169,7 +1170,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
-        torch_npu._npu_paged_attention(
+        from vllm.plugins.native_attention_operator_observer import observe_native_call
+        observe_native_call(
+            'torch_npu._npu_paged_attention', torch_npu._npu_paged_attention, dict(
             query=query,
             key_cache=self.key_cache,
             value_cache=self.value_cache,
@@ -1179,6 +1182,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table=attn_metadata.block_tables,
             context_lens=attn_metadata.seq_lens,
             out=output,
+            ), metadata=attn_metadata, layer_name=self._layer_name,
         )
         return output
 

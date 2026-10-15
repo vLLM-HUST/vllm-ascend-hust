@@ -29,6 +29,24 @@ from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgr
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
 
 
+def test_engram_head_shard_rank_supports_older_host(monkeypatch):
+    from vllm_ascend.models.deepseek_v41.engram import parallel
+
+    monkeypatch.delattr(parallel.host_engram, "engram_head_shard_rank", raising=False)
+    monkeypatch.setattr(parallel, "get_tensor_model_parallel_rank", lambda: 2)
+    monkeypatch.setattr(parallel, "get_engram_dp_group", lambda: SimpleNamespace(world_size=3, rank_in_group=1))
+    assert parallel.engram_head_shard_rank() == 7
+    monkeypatch.setattr(parallel, "get_engram_dp_group", lambda: None)
+    assert parallel.engram_head_shard_rank() == 2
+
+
+def test_engram_head_shard_rank_prefers_host(monkeypatch):
+    from vllm_ascend.models.deepseek_v41.engram import parallel
+
+    monkeypatch.setattr(parallel.host_engram, "engram_head_shard_rank", lambda: 5, raising=False)
+    assert parallel.engram_head_shard_rank() == 5
+
+
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
     from vllm_ascend.models.deepseek_v41.engram import parallel
 
