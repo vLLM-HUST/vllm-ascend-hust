@@ -22,7 +22,7 @@
 
   - [ ] Update contributor info in docs/source/community/contributors.md
 
-  - [ ] Update package version in mkdocs.yml (extra: block)
+  - [ ] Update package version in docs/conf.py
 
 
 ### Bug need Solve

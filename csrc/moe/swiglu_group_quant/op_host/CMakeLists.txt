@@ -58,3 +58,4 @@ endif()
 if(NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE swiglu_group_quant ACLNNTYPE aclnn)
 endif()
+

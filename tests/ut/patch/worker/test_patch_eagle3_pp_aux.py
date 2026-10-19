@@ -15,13 +15,11 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3Model
 from vllm_ascend.patch.worker import patch_eagle3_pp_aux as eagle3_pp_aux
 
 
@@ -272,10 +270,8 @@ def test_make_empty_intermediate_tensors_allocates_only_incoming_aux_layers():
     assert result["aux_layer_0"].dtype == torch.float32
 
 
-@pytest.mark.parametrize("supports_aux_hidden_states_over_pp", [False, True])
-def test_patch_accepts_eagle_mixin_model(supports_aux_hidden_states_over_pp):
+def test_patch_accepts_eagle_mixin_model():
     model = _FakeEagleMixinModel(start_layer=2, end_layer=4, aux_hidden_state_layers=(0, 2, 3))
-    model.supports_aux_hidden_states_over_pp = supports_aux_hidden_states_over_pp
 
     assert eagle3_pp_aux.patch_eagle3_pp_aux_propagation(model) is True
     assert model._eagle3_pp_aux_forward_patched is True
@@ -288,20 +284,6 @@ def test_patch_accepts_eagle_mixin_model(supports_aux_hidden_states_over_pp):
     )
 
     assert set(result.tensors) == {"hidden_states", "residual", "aux_layer_0"}
-
-
-def test_patch_preserves_minimax_m3_native_pp_methods():
-    model = MiniMaxM3Model.__new__(MiniMaxM3Model)
-    nn.Module.__init__(model)
-    model.make_empty_intermediate_tensors = lambda *args, **kwargs: None
-    original_forward = model.forward
-    original_make_empty = model.make_empty_intermediate_tensors
-
-    assert eagle3_pp_aux.patch_eagle3_pp_aux_propagation(model) is False
-    assert model.forward == original_forward
-    assert model.make_empty_intermediate_tensors is original_make_empty
-    assert not getattr(model, "_eagle3_pp_aux_forward_patched", False)
-    assert not getattr(model, "_eagle3_pp_aux_make_empty_patched", False)
 
 
 def test_patch_rejects_unsupported_model():

@@ -59,3 +59,4 @@ if(NOT BUILD_OPS_RTY_KERNEL)
     message(STATUS "=== Debug: BUILD is NOT BUILD_OPS_RTY_KERNEL")
     add_modules_sources(OPTYPE hc_pre ACLNNTYPE aclnn)
 endif()
+

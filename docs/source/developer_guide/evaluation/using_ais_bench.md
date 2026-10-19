@@ -8,11 +8,12 @@ This document guides you to conduct accuracy testing using [AISBench](https://gi
 
 You can run docker container to start the vLLM server on a single NPU:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -35,13 +36,14 @@ docker run --rm \
 
 Run the vLLM server in the docker.
 
-```bash
+```{code-block} bash
+   :substitutions:
 vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 35000 &
 ```
 
-!!! note
-
-    `--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+:::{note}
+`--max-model-len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+:::
 
 The vLLM server is started successfully, if you see logs as below:
 
@@ -97,7 +99,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
     unzip mmlu.zip
     rm mmlu.zip
     ```
@@ -106,7 +108,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
     unzip gpqa.zip
     rm gpqa.zip
     ```
@@ -115,7 +117,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
     unzip math.zip
     rm math.zip
     ```
@@ -124,9 +126,8 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    # If HuggingFace is slow or unreachable, set HF_ENDPOINT to a mirror:
-    # export HF_ENDPOINT=https://hf-mirror.com
-    huggingface-cli download livecodebench/code_generation_lite --repo-type dataset --local-dir code_generation_lite
+    git lfs install
+    git clone https://huggingface.co/datasets/livecodebench/code_generation_lite
     ```
 
 6. `AIME 2024` dataset.
@@ -135,7 +136,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
     cd ais_bench/datasets
     mkdir aime/
     cd aime/
-    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
     unzip aime.zip
     rm aime.zip
     ```
@@ -144,14 +145,14 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
+    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
     unzip gsm8k.zip
     rm gsm8k.zip
     ```
 
 #### Configuration
 
-Update the file `ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
+Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
 
 - `attr`: Identifier for the inference backend type, fixed as `service` (serving-based inference) or `local` (local model).

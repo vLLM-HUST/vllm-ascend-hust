@@ -17,8 +17,8 @@ FUSE_SELECT_MAX = 1
 SDMA_MATA_BW_LOW = 0
 SDMA_MATA_BW_HIGH = 1
 SDMA_MATA_HARDLIMIT = 0
-CACHEABLE_VL_INIT = 0
-NONCACHEABLE_VL_INIT = 1
+D2D_VL_INIT = 0
+H2D_VL_INIT = 1
 STATE_SDMA_MATA_LEN = 4
 STATE_QOS_TUPLE_LEN = 5
 STATE_FUSE_GBL_LEN = 3
@@ -324,9 +324,11 @@ class AiqosConfig:
         self.mode = aiqos_config.get("mode")
         self.aiqos_priority = aiqos_config.get("aiqos_priority")
         self.aiqos_table = {
-            "AIV": {"low": (4, 4, 2, 1), "middle": (4, 4, 2, 2), "high": (4, 4, 2, 3)},
-            "PCIEDMA": {"low": (5, 5, 3, 1), "middle": (5, 5, 3, 2), "high": (5, 5, 3, 3)},
-            "SDMA": {"low": (6, 6, 4, 1), "middle": (6, 6, 4, 2), "high": (6, 6, 4, 3)},
+            "AIV_D2D": {"low": (1, 0, 0, 1), "middle": (3, 4, 1, 2), "high": (5, 5, 2, 3)},
+            "AIV_H2D": {"low": (1, 0, 3, 1), "middle": (3, 4, 4, 2), "high": (5, 5, 5, 3)},
+            "SDMA_D2D": {"low": (2, 0, 0, 1), "middle": (4, 4, 1, 2), "high": (6, 5, 2, 3)},
+            "SDMA_H2D": {"low": (2, 0, 3, 1), "middle": (4, 4, 4, 2), "high": (6, 5, 5, 3)},
+            "PCIEDMA_H2D": {"low": (0, 0, 3, 1), "high": (7, 5, 5, 3)},
         }
         self.masterid_table = {
             "AIV_DATA": MASTER_ID_AIV_DATA,
@@ -354,22 +356,24 @@ class AiqosConfig:
             )
             original_fuse = _capture_original_fuse(device_list)
 
-        attributes = ("sqos", "dqos", "vl", "pri")
+        attributes = ["sqos", "dqos", "vl", "pri"]
         for op_type in self.aiqos_table:
             level = self.aiqos_priority.get(op_type)
             config_tuple = self.aiqos_table.get(op_type).get(level)
             for idx, attr in enumerate(attributes):
                 var_name = f"{op_type.lower()}_{attr}"
                 setattr(self, var_name, config_tuple[idx])
-        aiv_qos = self.aiv_sqos
-        sdma_qos = self.sdma_sqos
-        pcie_qos = self.pciedma_sqos
+        aiv_qos = min(self.aiv_d2d_sqos, self.aiv_h2d_sqos)
+        sdma_qos = min(self.sdma_d2d_sqos, self.sdma_h2d_sqos)
+        pcie_qos = self.pciedma_h2d_sqos
         fuse_mode = FUSE_SELECT_MAX
 
         command_types = {
-            "aiv": (aiv_qos, (CACHEABLE_VL_INIT, NONCACHEABLE_VL_INIT)),
-            "sdma": (sdma_qos, (CACHEABLE_VL_INIT, NONCACHEABLE_VL_INIT)),
-            "pciedma": (pcie_qos, (CACHEABLE_VL_INIT, NONCACHEABLE_VL_INIT)),
+            "aiv_d2d": aiv_qos,
+            "aiv_h2d": aiv_qos,
+            "sdma_d2d": sdma_qos,
+            "sdma_h2d": sdma_qos,
+            "pciedma_h2d": pcie_qos,
         }
 
         def generate_command(qos_value: int, dqos: int, vl: int, pri: int, vl_init: int) -> str:
@@ -384,15 +388,17 @@ class AiqosConfig:
             )
 
         cmd_set: set[str] = set()
-        for cmd_type, (qos_value, vl_inits) in command_types.items():
+        for cmd_type, qos_value in command_types.items():
             dqos = getattr(self, f"{cmd_type}_dqos")
             vl = getattr(self, f"{cmd_type}_vl")
             pri = getattr(self, f"{cmd_type}_pri")
-            for vl_init in vl_inits:
-                cmd_str = generate_command(qos_value, dqos, vl, pri, vl_init)
-                for sub_str in cmd_str.split("\n"):
-                    if sub_str.strip():
-                        cmd_set.add(sub_str)
+            vl_init = D2D_VL_INIT
+            if "h2d" in cmd_type:
+                vl_init = H2D_VL_INIT
+            cmd_str = generate_command(qos_value, dqos, vl, pri, vl_init)
+            for sub_str in cmd_str.split("\n"):
+                if sub_str.strip():
+                    cmd_set.add(sub_str)
         printed_commands = sorted(cmd_set)
 
         for device_id in device_list:
@@ -430,7 +436,7 @@ class AiqosConfig:
         )
 
 
-def _create_parser() -> argparse.ArgumentParser:
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="AI QoS tuning for Ascend NPU.  "
         " Multiple apply reuses the "
@@ -444,30 +450,25 @@ def _create_parser() -> argparse.ArgumentParser:
         help='Run "unset" to restore the first-apply snapshot and delete the state file.',
     )
     parser.add_argument("--mode", type=str, default="auto", choices=["auto", "manual"])
-    parser.add_argument("--AIV", type=str, default="high", choices=["low", "middle", "high"])
-    parser.add_argument("--SDMA", type=str, default="low", choices=["low", "middle", "high"])
-    parser.add_argument("--PCIEDMA", type=str, default="high", choices=["low", "middle", "high"])
-    return parser
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = _create_parser().parse_args(argv)
+    parser.add_argument("--AIV_D2D", type=str, default="high", choices=["low", "middle", "high"])
+    parser.add_argument("--AIV_H2D", type=str, default="high", choices=["low", "middle", "high"])
+    parser.add_argument("--SDMA_D2D", type=str, default="high", choices=["low", "middle", "high"])
+    parser.add_argument("--SDMA_H2D", type=str, default="low", choices=["low", "middle", "high"])
+    parser.add_argument("--PCIEDMA_H2D", type=str, default="high", choices=["low", "high"])
+    args = parser.parse_args()
     state_path = DEFAULT_STATE_PATH
 
     if args.command == "unset":
         run_unset(state_path)
-        return
-
-    aiqos_config = {
-        "mode": args.mode,
-        "aiqos_priority": {
-            "AIV": args.AIV,
-            "SDMA": args.SDMA,
-            "PCIEDMA": args.PCIEDMA,
-        },
-    }
-    AiqosConfig(aiqos_config).set_qos(state_path)
-
-
-if __name__ == "__main__":
-    main()
+    else:
+        aiqos_config = {
+            "mode": args.mode,
+            "aiqos_priority": {
+                "AIV_D2D": args.AIV_D2D,
+                "AIV_H2D": args.AIV_H2D,
+                "SDMA_D2D": args.SDMA_D2D,
+                "SDMA_H2D": args.SDMA_H2D,
+                "PCIEDMA_H2D": args.PCIEDMA_H2D,
+            },
+        }
+        AiqosConfig(aiqos_config).set_qos(state_path)

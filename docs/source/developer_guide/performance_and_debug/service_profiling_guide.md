@@ -36,6 +36,8 @@ No additional packages need to be installed; it can be enabled through command-l
 Start the online service and set the `--profiler-config` parameter to control the path for saving performance files. After the parameter is set, the collection function is enabled.
 
 ```bash
+VLLM_PROMPT_SEQ_BUCKET_MAX=128
+VLLM_PROMPT_SEQ_BUCKET_MIN=128
 python3 -m vllm.entrypoints.openai.api_server \
 --port 8080 \
 --model "facebook/opt-125m" \
@@ -46,13 +48,9 @@ python3 -m vllm.entrypoints.openai.api_server \
 --max-model-len 256
 ```
 
-> Note: **January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.** [Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
+> Note:**January 19, 2026: The vLLM mainline has deprecated the VLLM_TORCH_PROFILER_DIR environment variable.**[Related PR](https://github.com/vllm-project/vllm-ascend/pull/5928)  When using the vLLM Ascend mainline code to collect profiler data, remember to use the `--profiler-config` (online) parameter or the `profiler_config` (offline) parameter.
 
 ### 2. Start Collection
-
-!!! note
-
-    The `/start_profile` and `/stop_profile` endpoints are **only registered** when the server is launched with `--profiler-config` set (profiler field non-empty). If you forget to set `--profiler-config`, these endpoints will not exist and `curl` will return **404 Not Found**.
 
 Performance collection is controlled by sending API requests. You can start collection after stabilizing the actual business data and collect profiling for a few seconds before stopping; or you can start collection first, then send business requests, and finally stop.
 
@@ -114,29 +112,7 @@ After analysis, the `*ascend_pt` directory will contain many files, with the mai
 
 - `trace_view.json`: Chrome tracing format data, can be opened with [MindStudio Insight](https://www.hiascend.com/document/detail/zh/mindstudio/81RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html)
 
-### Supplementary: Profiling in PD Disaggregation Scenarios
-
-In PD (Prefill-Decode) disaggregation deployments, the Prefiller and Decoder are **separate vLLM instances**, each with its own API server. Profiling must be configured and controlled **independently** on each node:
-
-1. **Both P and D** must launch with `--profiler-config` (pointing to different directories to avoid overwriting).
-
-2. The main PD load-balance proxy (`load_balance_proxy_server_example.py`) does **not** forward `/start_profile` or `/stop_profile`. You must curl **each node's HTTP port directly**:
-
-```bash
-# Start profiling on both P and D
-curl -X POST http://<prefiller_ip>:<prefiller_port>/start_profile
-curl -X POST http://<decoder_ip>:<decoder_port>/start_profile
-
-# Send business requests through the proxy...
-
-# Stop profiling on both P and D
-curl -X POST http://<prefiller_ip>:<prefiller_port>/stop_profile
-curl -X POST http://<decoder_ip>:<decoder_port>/stop_profile
-```
-
-!!! note
-
-    The EPD proxy (`epd_load_balance_proxy_layerwise_server_example.py`) **does** support broadcasting profiling commands to all E/P/D instances.
+[↑ Back to Top](#service-profiling-guide)
 
 ---
 
@@ -217,6 +193,8 @@ After parsing, the `output` directory will contain:
 
 ### 6. Appendix related to MS Service Profiler
 
+(profiling-configuration-file)=
+
 #### 6.1 Profiling Configuration File
 
 The profiling configuration file controls profiling parameters and behavior.
@@ -250,6 +228,8 @@ The configuration is in JSON format. Main parameters:
 ```
 
 ---
+
+(symbols-configuration-file)=
 
 #### 6.2 Symbols Configuration File
 
@@ -387,3 +367,5 @@ def custom_handler(original_func, this, *args, **kwargs):
 ```
 
 If the custom handler fails to import, the system will automatically fall back to the default timer mode.
+
+[↑ Back to Top](#service-profiling-guide)

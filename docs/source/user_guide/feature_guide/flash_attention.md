@@ -1,9 +1,9 @@
 # Flash Attention 3
 
-!!! note
-
-    Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
-    Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu/tree/trainInferConsist) (trainInferConsist branch) for more details.
+```{note}
+Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
+Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu) for more details.
+```
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
 
@@ -53,25 +53,22 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/trainInferConsist/README.md#installation> (trainInferConsist branch).
+To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 
-Enable FA3 through the RL configuration by setting `rl_config.enabled` and
-`rl_config.enable_training_consistency` to `true`.
+To enable FA3, you need to:
 
-Batch invariant mode is independent of FA3. If it is also required, set
-`rl_config.enable_batch_invariant` to `true`. You do not need to set
-`VLLM_BATCH_INVARIANT`, `HCCL_DETERMINISTIC`, or `LCCL_DETERMINISTIC`
-manually when using this configuration path.
+1. Set the environment variable `export VLLM_BATCH_INVARIANT=1` to enable batch invariant mode
+2. Specify the attention backend as `FLASH_ATTN` via the LLM parameter `attention_backend="FLASH_ATTN"`
 
 ### Online Inference (Server Mode)
 
 To start a vLLM server with FA3 enabled:
 
 ```bash
-vllm serve Qwen/Qwen3-8B \
-  --additional-config '{"rl_config": {"enabled": true, "enable_training_consistency": true}}' \
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+  --attention-backend FLASH_ATTN \
   --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
@@ -101,12 +98,15 @@ print(response.choices[0].text)
 For offline batch inference with FA3:
 
 ```python
+import os
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
+
 from vllm import LLM, SamplingParams
 
 prompts = [
     "The future of AI is",
     "Machine learning enables",
-    "Deep learning models can",
+    "Deep learning models can"
 ]
 
 sampling_params = SamplingParams(
@@ -118,12 +118,7 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
-    additional_config={
-        "rl_config": {
-            "enabled": True,
-            "enable_training_consistency": True,
-        },
-    },
+    attention_backend="FLASH_ATTN",
     compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
@@ -138,6 +133,7 @@ for output in outputs:
 
 ## Limitations
 
+- **Package not yet open-sourced**: The `flash_attn_npu` package required for FA3 has not yet been released. External users cannot use FA3 until the package is available.
 - **Sliding window not supported**: FA3 does not support sliding window attention. Models that require sliding window need to use the default FIA backend.
 - **ACL graph capture not supported**: The tiling of `flash_attn_with_kvcache` is processed on the host side and currently does not support ACL graph capture. Please use `compilation_config={"cudagraph_mode": "PIECEWISE"}` when enabling FA3.
 - **RoPE not supported**: FA3 does not support rotary position embedding within the attention kernel. vLLM-Ascend patches this by using the PyTorch native RoPE fallback instead.
@@ -146,9 +142,9 @@ for output in outputs:
 - **FP8 quantization not supported**: FA3 does not support FP8 quantized attention.
 - **MLA and SFA not supported**: FA3 does not support Multi-head Latent Attention (MLA) or Sparse Flash Attention (SFA).
 
-!!! note
-
-    Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
+```{note}
+Enabling FA3 may cause performance degradation compared to the default FIA backend. This trade-off is intentional to guarantee training-inference consistency.
+```
 
 ## Tested Models
 
@@ -157,7 +153,7 @@ FA3 has been tested and verified on the following models:
 - **Qwen3 (Dense)**: `Qwen/Qwen3-0.6B`, `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`
 - **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`
 
-Other models have not been tested yet. They will be supported in the future if they pass testing.
+Other models have not been tested yet and will be supported in the future if not supported after being tested.
 
 ## Future Improvements
 

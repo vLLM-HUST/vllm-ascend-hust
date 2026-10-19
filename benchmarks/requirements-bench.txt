@@ -1,5 +1,4 @@
 pandas
 datasets
-modelscope<1.38
-pyarrow<26
+modelscope
 tabulate

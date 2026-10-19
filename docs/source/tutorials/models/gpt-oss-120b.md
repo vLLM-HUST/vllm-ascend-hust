@@ -1,49 +1,47 @@
 # gpt-oss-120b
 
-## 1 Introduction
+## Introduction
 
 gpt-oss-120b and gpt-oss-20b are two open-weight reasoning models that push the frontier of accuracy and inference cost. The models use an efficient mixture-of-experts transformer architecture and are trained using large-scale distillation and reinforcement learning. We optimize the models to have strong agentic capabilities (deep research browsing, python tool use, and support for developer-provided functions), all while using a rendered chat format that enables clear instruction following and role delineation. Both models achieve strong results on benchmarks ranging from mathematics, coding, and safety. We release the model weights, inference implementations, tool environments, and tokenizers under an Apache 2.0 license to enable broad use and further research.
 
-## 2 Supported Features
+## Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Environment Preparation
+## Environment Preparation
 
-### 3.1 Model Weight
+### Model Weight
 
-|  Weight Version              | Hardware Requirements                                               | Download Links |
-|------------------------------|---------------------------------------------------------------------|----------------|
-| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes | [Hugging Face](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |
+- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
-
-## 4 Installation
+### Installation
 
 You can use our official docker image for supporting gpt-oss-120b-bf16 models.
 Currently, we provide the all-in-one images. [Download images](https://quay.io/repository/ascend/vllm-ascend?tab=tags)
 
-### 4.1 Docker Pull (by tag)
+#### Docker Pull (by tag)
 
-```bash
+```{code-block} bash
+   :substitutions:
 
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 ```
 
-### 4.2 Docker run
+#### Docker run
 
-```bash
+```{code-block} bash
+   :substitutions:
 
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
 # Update the vllm-ascend image according to your environment.
 # Note you should download the weight to /root/.cache in advance.
 # For Atlas A2 machines:
-# export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 # For Atlas A3 machines:
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
@@ -73,11 +71,11 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-## 5 Deployment
+## Deployment
 
-### 5.1 Troubleshooting
+### Troubleshooting
 
 Run into
 
@@ -92,7 +90,7 @@ wget -O tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.
 export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 ```
 
-### 5.2 Single-node Deployment
+### Single-node Deployment
 
 `gpt-oss-120b` can both be deployed on 1 Atlas 800 A3(64GB × 16), 1 Atlas 800 A2(64GB × 8).
 
@@ -113,7 +111,6 @@ export TASK_QUEUE_ENABLE=1
 export OMP_NUM_THREADS=1
 export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 
-# Ensure the model path matches the directory recorded during download
 vllm serve unsloth/gpt-oss-120b-BF16 \
 --served-model-name gpt-oss-120b-bf16 \
 --port 8000 \
@@ -141,7 +138,7 @@ The parameters are explained as follows:
 "cudagraph_mode": represents the specific graph mode. Currently, "PIECEWISE" and "FULL_DECODE_ONLY" are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, "FULL_DECODE_ONLY" is recommended.
 - "cudagraph_capture_sizes": represents different levels of graph modes. The default value is [1, 2, 4, 8, 16, 24, 32, 40,..., `--max-num-seqs`]. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
-## 6 Functional Verification
+## Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -154,11 +151,11 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-## 7 Accuracy Evaluation
+## Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
-### 7.1 Using AISBench
+### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -168,13 +165,13 @@ Here are two accuracy evaluation methods.
 |----- | ----- | ----- | ----- | -----|
 | mmlu | - | accuracy | gen | 89.50 |
 
-## 8 Performance Evaluation
+## Performance
 
-### 8.1 Using AISBench
+### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### 8.2 Using vLLM Benchmark
+### Using vLLM Benchmark
 
 Run performance evaluation of `gpt-oss-120b-BF16` as an example.
 

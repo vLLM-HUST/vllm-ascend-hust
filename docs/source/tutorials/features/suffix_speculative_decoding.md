@@ -19,21 +19,23 @@ The benchmarking tool used in this tutorial is AISBench, which supports performa
 
 ## **Download vllm-ascend Image**
 
-This tutorial uses the official image, version `{{ vllm_ascend_version }}`. Use the following command to download:
+This tutorial uses the official image. Use the following command to download:
 
-```bash
+```{code-block} bash
+:substitutions:
 
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+docker pull quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
 ## **Run with Docker**
 
 Container startup command:
 
-```bash
+```{code-block} bash
+:substitutions:
 
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -82,6 +84,9 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
+# Enable FlashComm_v1 optimization when tensor parallel is enabled.
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
 vllm serve /data/Qwen3-32B \
   --served-model-name qwen3 \
   --trust-remote-code \

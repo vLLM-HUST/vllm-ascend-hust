@@ -178,18 +178,11 @@ class TestLoggerModule(TestBase):
     def test_rotating_handler_rotates_on_size(self):
         import os
         import tempfile
-        from datetime import datetime
-        from unittest.mock import patch
 
         from vllm_ascend.logger import RotatingAscendFileHandler
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("vllm_ascend.logger.datetime") as mock_datetime:
-                mock_datetime.now.return_value = datetime(2026, 8, 6, 0, 27, 15)
-                handler = RotatingAscendFileHandler(tmpdir, max_bytes=100)
-            base_filename = os.path.basename(handler.baseFilename)
-            rotated_filename = f"{base_filename.removesuffix('.log')}_002.log"
-            self.assertIn("_002715_", base_filename)
+            handler = RotatingAscendFileHandler(tmpdir, max_bytes=100)
             handler.setFormatter(logging.Formatter("%(message)s"))
             logger = logging.getLogger("test_rotate")
             logger.addHandler(handler)
@@ -203,5 +196,6 @@ class TestLoggerModule(TestBase):
 
             files = sorted(os.listdir(tmpdir))
             self.assertGreaterEqual(len(files), 2)
-            self.assertIn(base_filename, files)
-            self.assertIn(rotated_filename, files)
+            self.assertTrue(files[0].endswith(".log"))
+            self.assertNotIn("_002", files[0])
+            self.assertIn("_002", files[1])

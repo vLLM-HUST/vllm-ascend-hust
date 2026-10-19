@@ -17,74 +17,73 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import is_310p, vllm_version_is
+
+# The v2 model runner is intentionally NOT made compatible with the v0.23.0
+# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
+# worker patches target main-only APIs; rather than maintain a separate v0.23.0
+# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
+# False, so none of the patch_v2.* / routed-experts-capture patches below are
+# imported and the v2 worker stays dormant (the release uses the v1 runner).
+if vllm_version_is("0.23.0"):
+    _V2_MODEL_RUNNER_SUPPORTED = False
+else:
+    _V2_MODEL_RUNNER_SUPPORTED = True
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
-    import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+
+    if _V2_MODEL_RUNNER_SUPPORTED:
+        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
-# Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
-# that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
-# worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
-import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
-
+import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
+import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
+import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
-import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
-import vllm_ascend.patch.worker.patch_step3p5  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
-if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+if not is_310p():
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 
+# torchair/npugraph_ex is only available on NPU; silently skip when missing
+# so that CPU-only environments (e.g. UT runners without torch_npu) can still
+# import this module without crashing.
+try:  # noqa: SIM105
+    import vllm_ascend.patch.worker.patch_npugraph_ex_triton  # noqa
+except ImportError:
+    pass
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
+import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
+import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
+import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
-# Re-apply the default-V2 runner selection (with the V2 feature blacklist)
-# and related V2/V1 feature patches in worker processes.
-# VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
+# vLLM's use_v2_model_runner may enable the v2 runner without the
+# VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
+# We always patch it so that on Ascend the v2 runner is enabled only
+# when the env var is explicitly set.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
-import vllm_ascend.patch.worker.patch_fused_moe  # noqa
+if not vllm_version_is("0.23.0"):
+    import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
-import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_model_runner  # noqa
-
-import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_dspark  # noqa
-import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
-
-# 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
-# patch_eagle_speculator above installs the 910 manager; re-override here.
-if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
-    try:
-        from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (  # type: ignore[import-not-found]
-            speculator as _ar_spec,
-        )
-    except ImportError:
-        from vllm.v1.worker.gpu.spec_decode.autoregressive import (  # type: ignore[import-not-found, no-redef]
-            speculator as _ar_spec,
-        )
-
-    from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
-        AutoRegressiveAclGraphManager310,
-    )
-
-    _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+if _V2_MODEL_RUNNER_SUPPORTED:
+    import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
 # only patch routed experts capture in main2main.
-import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+if _V2_MODEL_RUNNER_SUPPORTED:
+    import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

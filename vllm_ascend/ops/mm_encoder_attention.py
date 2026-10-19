@@ -32,7 +32,6 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
-    EncoderGraphKey,
     get_encoder_forward_context,
     get_encoder_graph_params,
     maybe_compute_actual_seq_lengths,
@@ -121,11 +120,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         *,
         is_capturing: bool = False,
     ) -> torch.Tensor:
-        # In the eager path, if cu_seqlens is provided by the model we use it; if it is not provided, we create a
-        # default one assuming all sequences have the same length. This is used by models such as Hunyuan-OCR, which
-        # always pass None as cu_seqlens and rely on the operator to compute it internally.
-        # In the capture path, we always create the default cu_seqlens on CPU instead of using the model tensor, to
-        # avoid a device-to-host sync (.cpu()).
+        # If cu_seqlens is not provided, we create a default one assuming all sequences have the same length.
+        # This is used by models such as Hunyuan-OCR, which always pass None as cu_seqlens and rely on the operator to
+        # compute it internally.
         if is_capturing or cu_seqlens is None:
             cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device="cpu")
             return cu_seqlens
@@ -214,8 +211,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=False,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
-        k = k.contiguous()
-        v = v.contiguous()
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
         context_layer = self._maybe_unpad_output(context_layer, origin_head_dim)
         return self._restore_batch_layout(
@@ -238,8 +233,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         context = get_encoder_forward_context()
         token_budget = context.token_budget
-        path = context.path
-        axis_keys = context.axis_keys
         is_capturing = context.capturing
         params = get_encoder_graph_params()
         if token_budget is None or params is None:
@@ -252,17 +245,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=True,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
-        # FIA requires contiguous K/V tensors. Materialize them before graph-task
-        # capture so the tensors retained in ``attn_params`` are exactly the
-        # tensors whose addresses were captured by the operator.
-        k = k.contiguous()
-        v = v.contiguous()
 
         out = torch.empty_like(q)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
 
-        graph_key: EncoderGraphKey = (path, token_budget, axis_keys) if axis_keys else (path, token_budget)
-        workspace = params.workspaces.get(graph_key)
+        workspace = params.workspaces.get(token_budget)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=q,
@@ -281,7 +268,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 pre_tokens=SWA_INT_MAX,
                 next_tokens=SWA_INT_MAX,
             )
-            update_encoder_graph_workspace(token_budget, workspace, path=path, axis_keys=axis_keys)
+            update_encoder_graph_workspace(token_budget, workspace)
 
         stream = torch_npu.npu.current_stream()
         event = torch.npu.ExternalEvent()
@@ -314,9 +301,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             weak_ref_tensors(out),
             weak_ref_tensors(softmax_lse),
         )
-        params.attn_params[graph_key].append(packed)
-        params.events[graph_key].append(event)
-        params.handles[graph_key].append(handle)
+        params.attn_params[token_budget].append(packed)
+        params.events[token_budget].append(event)
+        params.handles[token_budget].append(handle)
 
         context_layer = self._maybe_unpad_output(out, origin_head_dim)
         return self._restore_batch_layout(

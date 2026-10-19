@@ -63,7 +63,7 @@ class AscendParallelLMHead310(AscendParallelLMHead):
     Register ParallelLMHead as a custom op for Atlas 310p.
     """
 
-    def __init__(  # type: ignore[misc]
+    def __init__(
         self,
         num_embeddings: int,
         embedding_dim: int,
@@ -73,19 +73,9 @@ class AscendParallelLMHead310(AscendParallelLMHead):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        *,
-        disable_tp: bool = False,
     ):
         super().__init__(
-            num_embeddings,
-            embedding_dim,
-            bias,
-            params_dtype,
-            org_num_embeddings,
-            padding_size,
-            quant_config,
-            prefix,
-            disable_tp=disable_tp,  # type: ignore[call-arg]
+            num_embeddings, embedding_dim, bias, params_dtype, org_num_embeddings, padding_size, quant_config, prefix
         )
 
         if quant_config is None:

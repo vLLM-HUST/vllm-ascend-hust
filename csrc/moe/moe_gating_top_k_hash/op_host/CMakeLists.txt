@@ -59,3 +59,4 @@ if(NOT BUILD_OPS_RTY_KERNEL)
     message(STATUS "=== Debug: BUILD is NOT BUILD_OPS_RTY_KERNEL")
     add_modules_sources(OPTYPE moe_gating_top_k_hash ACLNNTYPE aclnn)
 endif()
+

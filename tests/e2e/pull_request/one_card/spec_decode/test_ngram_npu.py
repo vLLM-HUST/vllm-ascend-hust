@@ -10,8 +10,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import calculate_acceptance_per_pos
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
-
 
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 def test_ngram_npu_async_acceptance(
@@ -27,7 +25,7 @@ def test_ngram_npu_async_acceptance(
 
     speculative_config = {
         "method": "ngram_gpu",
-        "prompt_lookup_max": 5,
+        "prompt_lookup_max": 2,
         "prompt_lookup_min": 2,
         "num_speculative_tokens": num_speculative_tokens,
     }
@@ -63,4 +61,8 @@ def test_ngram_npu_async_acceptance(
     golden = [0.50, 0.30, 0.20]
 
     match = all(abs(a - b) < 1.0 for a, b in zip(acceptance_per_pos, golden))
-    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+    if not match:
+        print(f"acceptance_per_pos: {acceptance_per_pos}")
+        print(f"golden: {golden}")
+
+    assert match

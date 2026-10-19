@@ -1,4 +1,4 @@
-# InternVL3.5(38B/241B-A28B)
+# InternVL3.5(InternVL3_5-38B/241B-A28B)
 
 ## 1 Introduction
 
@@ -10,20 +10,18 @@ This document will show the main verification steps of both `InternVL3_5-38B` an
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-|  Weight Version                       | Hardware Requirements           | Download Links |
-|---------------------------------------|---------------------------------|----------------|
-| `InternVL3_5-38B-w8a8`                | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8) |
-| `InternVL3_5-241B-A28B-w8a8`          | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8) |
+require 1 Atlas 800 A3 (64G × 16) node:
 
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)
+- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)
 
 ## 4 Installation
 
@@ -70,25 +68,27 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
+To verify the successful installation of the environment, please refer to [installation](../../installation.md).
 
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+If you want to deploy multi-node environment, you need to set up environment on each node.
+
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 === "InternVL3_5-38B"
 
-    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -96,6 +96,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
     sysctl -w kernel.numa_balancing=0
     sysctl -w kernel.sched_migration_cost_ns=50000
 
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -105,18 +107,19 @@ In addition, if you don't want to use the docker image as above, you can also bu
     export VLLM_TORCH_PROFILER_WITH_STACK=0
     export HCCL_BUFFSIZE=1536
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ \
         --port 2002 \
         --served-model-name internvl3_5 \
         --trust-remote-code \
+        --async-scheduling \
         --max-model-len 40960 \
         --max-num-batched-tokens 16384 \
         --tensor-parallel-size 4 \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.9 \
+        --async-scheduling \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
-        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
         --mm-processor-cache-gb 0 \
         --enable-chunked-prefill \
         --safetensors-load-strategy 'prefetch' \
@@ -126,11 +129,11 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 === "InternVL3_5-241B-A28B"
 
-    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -138,6 +141,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
     sysctl -w kernel.numa_balancing=0
     sysctl -w kernel.sched_migration_cost_ns=50000
 
+    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -147,19 +152,20 @@ In addition, if you don't want to use the docker image as above, you can also bu
     export VLLM_TORCH_PROFILER_WITH_STACK=0
     export HCCL_BUFFSIZE=1536
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-w8a8/ \
         --port 2001 \
         --served-model-name internvl3_5 \
         --trust-remote-code \
+        --async-scheduling \
         --max-model-len 40960 \
         --max-num-batched-tokens 4096 \
         --tensor-parallel-size 4 \
         --data-parallel-size 2 \
         --max-num-seqs 70 \
         --gpu-memory-utilization 0.9 \
+        --async-scheduling \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
         --mm-processor-cache-gb 0 \
         --enable-chunked-prefill \
         --enable-expert-parallel \
@@ -171,7 +177,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 Some configurations for optimization are shown below:
 
-- `additional_config.enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- `VLLM_ASCEND_ENABLE_FLASHCOMM1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
 - The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 - For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -243,8 +250,8 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, refer to [Public FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).

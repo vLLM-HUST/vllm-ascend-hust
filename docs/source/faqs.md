@@ -2,8 +2,6 @@
 
 ## Version Specific FAQs
 
-- [[v0.30.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/17748)
-- [[v0.26.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/14766)
 - [[v0.23.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12916)
 - [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
 - [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
@@ -52,9 +50,10 @@ If you want to use container image for offline environments (no internet connect
 
 **Exporting Docker images:**
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Pull the image on a machine with internet access
-TAG={{ vllm_ascend_version }}
+TAG=|vllm_ascend_version|
 docker pull quay.io/ascend/vllm-ascend:$TAG
 
 # Export the image to a tar file and compress to tar.gz
@@ -63,9 +62,10 @@ docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
 
 **Importing Docker images in environment without internet access:**
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Transfer the tar/tar.gz file to the offline environment and load it
-TAG={{ vllm_ascend_version }}
+TAG=|vllm_ascend_version|
 docker load -i vllm-ascend-$TAG.tar.gz
 
 # Verify the image is loaded
@@ -226,11 +226,11 @@ Recommended mitigation strategies:
 5. If you are debugging a startup failure, temporarily disable graph mode (`cudagraph_mode="NONE"` / `enforce_eager=True`) to confirm the issue is capture-related.
 
 Root cause analysis:
-ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend applies capture-size pruning for selected hardware profiles. If capture still fails, upgrade the matching HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
+ACL graph capture can still fail when the runtime resources required by the selected graph sizes exceed what the current software/hardware stack can provide. This is most visible in `PIECEWISE` scenarios because the number of captured graphs scales with model depth and capture-size coverage. vLLM Ascend no longer auto-shrinks the PIECEWISE capture-size set locally, so the practical mitigations are to upgrade the HDK/CANN stack or reduce the configured graph sizes explicitly. The runtime guidance is intentionally narrow: it is only added when capture fails with the confirmed stream-resource signature above.
 
 ### 18. How to install custom version of torch_npu?
 
-TorchNPU will be overridden when installing vllm-ascend. If you need to install a specific version of TorchNPU, you can manually install the specified version of TorchNPU after vllm-ascend is installed.
+TorchNPU will be overridden  when installing vllm-ascend. If you need to install a specific version of TorchNPU, you can manually install the specified version of TorchNPU after vllm-ascend is installed.
 
 ### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
@@ -249,7 +249,7 @@ This is often due to system compatibility issues. You can resolve this by using 
    export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
    # If in China region, uncomment to use a mirror:
    # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
-
+   
    # Pull the image for the ARM64 platform and save it
    docker pull --platform linux/arm64 "${IMAGE_NAME}"
    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
@@ -279,7 +279,7 @@ export SOC_VERSION="ascend910_9391"
 # Atlas 300I
 export SOC_VERSION="ascend310p1"
 
-# 950PR&950DT Products
+# Ascend 950 Products
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
@@ -303,6 +303,10 @@ Single-node deployment is recommended when the model fits within the memory of a
 - **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
 - **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
 
-### 25. What is the difference between FIA and PA operators for attention?
+### 25. When should I enable FlashComm_v1?
+
+Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
+
+### 26. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

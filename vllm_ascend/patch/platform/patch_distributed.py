@@ -19,7 +19,7 @@
 
 import torch
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 class NullHandle:
@@ -85,5 +85,5 @@ def communication_adaptation_310p():
     )
 
 
-if get_current_hardware_profile().supports(HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION):
+if get_ascend_device_type() == AscendDeviceType._310P:
     communication_adaptation_310p()

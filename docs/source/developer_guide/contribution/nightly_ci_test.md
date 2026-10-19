@@ -9,13 +9,6 @@ By default, nightly CI tests run on a fixed schedule using pre-built nightly ima
 Contributors can self-service trigger these tests directly against their PR changes
 by combining a GitHub label with a comment command.
 
-!!! note
-
-    The `schedule_nightly_test_*.yaml` workflows do not declare a GitHub Actions
-    `schedule:` (cron) trigger; they are dispatched by external automation through
-    `workflow_dispatch`. See
-    [CI workflow triggers and the schedule_ prefix](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
-
 ## How to Trigger
 
 ### 1. Post a comment
@@ -28,35 +21,15 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly` | Run **all** nightly tests |
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
-| `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
 
-!!! note
-
-    Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
-    trigger the `/nightly` command. If you do not have this permission, ask a maintainer
-    to post the comment for you. You can find the list of maintainers and contributors in
-    the project's [Governance](../../community/governance.md) page or by checking the
-    [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
-    file.
-
-### Maintenance window
-
-Maintainers can pause PR-triggered commands during a maintenance window by setting
-the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW`. The value is an optional
-switch followed by an `HH:MM-HH:MM` range in Beijing time (UTC+8):
-
-| Value | Behavior |
-|-------|----------|
-| `true 22:00-08:00` | Gate enabled; block inside the window |
-| `22:00-08:00` | Same as above (switch omitted) |
-| `false 22:00-08:00` | Gate explicitly disabled |
-| unset / invalid | Gate disabled (fail-open) |
-
-Switch aliases are `true/1/yes/on` and `false/0/no/off` (case-insensitive); a space
-or comma may separate the switch from the range. Cross-midnight ranges are
-supported. While the gate is enabled and the current Beijing time falls inside the
-range, `/nightly` and `/weekly` comments do not dispatch tests; the bot replies with
-the active window instead.
+:::{note}
+Only repository **Contributors** (Triage role) and **Maintainers** (Write role) can
+trigger the `/nightly` command. If you do not have this permission, ask a maintainer
+to post the comment for you. You can find the list of maintainers and contributors in
+the project's [Governance](../../community/governance.md) page or by checking the
+[CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+file.
+:::
 
 ### 2. Wait for results
 
@@ -162,62 +135,60 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 | Test name | Description |
 |-----------|-------------|
+| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 
 **Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
 
 | Test name | Description |
 |-----------|-------------|
+| `multi-node-deepseek-r1-w8a8-longseq` | DeepSeek-R1-W8A8 long sequence, 2-node |
+| `multi-node-qwen3-dp` | Qwen3-235B-A22B, 2-node DP |
+| `multi-node-qwenw8a8-2node-eplb` | Qwen3-235B-W8A8 with EPLB, 2-node |
+| `multi-node-dpsk3.2-2node` | DeepSeek-V3.2-W8A8, 2-node |
+| `multi-node-qwenw8a8-2node-longseq` | Qwen3-235B-W8A8 long sequence, 2-node |
+| `multi-node-qwen-disagg-pd` | Qwen3-235B disaggregated PD, 2-node |
 | `multi-node-qwen-vl-disagg-pd` | Qwen3-VL-235B disaggregated PD, 2-node |
 | `multi-node-deepseek-v3.1` | DeepSeek-V3.1-BF16, 2-node |
+| `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
 | `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
-!!! warning
-
-    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-    A3 will queue a large number of jobs — prefer targeting specific test names when
-    possible.
-
-### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
-
-**Single-node tests** (`a3-560t.single_node.test_config`):
+**Single-node tests** (`a3.single_node.test_config`):
 
 | Test name | Description |
 |-----------|-------------|
-| `Qwen3.8-27B-w8a8-A3` | Qwen3.8-27B W8A8 + MTP |
-| `MiniMax-M3-W8A8-A3` | MiniMax-M3 W8A8 |
-| `qwen_3_6_27b_w8a8_A3` | Qwen3.6-27B W8A8 + MTP |
-| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 + MTP |
-| `DeepSeek-V4-Flash-W8A8-A3-MRV2` | DeepSeek-V4-Flash W8A8, MRV2 + DSpark |
-| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 + MTP |
-| `kimi-k2.6_max_model_len` | Kimi-K2.6 W4A8, maximum model length |
-| `Kimi-K2.6-w4a8-A3` | Kimi-K2.6 W4A8 + DFlash |
-| `glm-5.1-w8a8-prefill-mc2` | GLM-5.1 W8A8, prefill MC2 |
-| `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
-| `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |
-| `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |
+| `mtpx-deepseek-r1-0528-w8a8` | MTP-X + DeepSeek-R1-0528-W8A8 |
+| `deepseek-r1-0528-w8a8` | DeepSeek-R1-0528-W8A8 |
+| `kimi-k2-thinking` | Kimi-K2-Thinking |
+| `qwen3-vl-235b-a22b-instruct-w8a8` | Qwen3-VL-235B-A22B-Instruct-W8A8 |
+| `deepseek-r1-0528-w8a8-prefix-cache` | DeepSeek-R1-0528-W8A8 prefix cache |
+| `deepseek-v3-2-w8a8` | DeepSeek-V3.2-W8A8 |
+| `glm-4.7-w8a8` | GLM-4.7 W8A8 |
+| `kimi-k2.5` | Kimi-K2.5 |
+| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
-| `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
-| `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
-| `glm-5.2-w4a8c8-sfa-dcp` | GLM-5.2 W4A8C8, DCP16 |
-| `glm-5.2-w4a8-dspark` | GLM-5.2 W4A8 + DSpark |
-| `glm-5.2-w4a8-mtp` | GLM-5.2 W4A8 + MTP |
-| `glm-5.2-w4a8-dspark-v2` | GLM-5.2 W4A8, MRV2 + DSpark |
-| `glm-5.2-w4a8-mtp-v2` | GLM-5.2 W4A8, MRV2 + MTP |
+| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |
+| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |
+| `Qwen3.5-122B-A10B-W8A8-A3` | Qwen3.5-122B-A10B W8A8 |
+| `DeepSeek-V4-Flash-W8A8-A3` | DeepSeek-V4-Flash W8A8 |
 
-**Multi-card tests** (`a3-560t.multi_card.test_config`):
+**Multi-card tests** (`a3.multi_card.test_config`):
 
 | Test name | Description |
 |-----------|-------------|
 | `qwen3-30b-acc` | Qwen3-30B accuracy test |
-| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 + MTP |
-| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B W8A8 |
+| `qwen3-30b-a3b-w8a8` | Qwen3-30B-A3B-W8A8 |
+| `qwen3-32b-int8` | Qwen3-32B-Int8 |
+| `qwen3-32b-int8-prefix-cache` | Qwen3-32B-Int8 prefix cache |
 | `Qwen3-30B-A3B-W4A8-llm-compressor` | Qwen3-30B-A3B W4A8 via llm-compressor |
-| `qwen3-32b-int8-prefix-cache` | Qwen3-32B W8A8 QuaRot prefix cache |
-| `qwen3-32b-int8` | Qwen3-32B W8A8 QuaRot |
-| `Qwen3-30B-QuaRot` | Qwen3-30B-A3B W8A8 QuaRot + Eagle3 |
-| `Qwen3-32B-QuaRot` | Qwen3-32B W8A8 QuaRot + Eagle3 |
-| `Qwen3-30B-A3B-VWN-eagle3-PCP` | Qwen3-30B-A3B BF16 + VWN-Eagle3 + PCP |
+| `Qwen3-30B-QuaRot` | Qwen3-30B QuaRot + eagle3 |
+| `Qwen3-32B-QuaRot` | Qwen3-32B QuaRot + eagle3 |
+
+:::{warning}
+The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
+run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
+A3 will queue a large number of jobs — prefer targeting specific test names when
+possible.
+:::
 
 ## Examples
 
@@ -239,12 +210,6 @@ Run two specific tests at once (one per SoC):
 /nightly test_custom_op_multi_card mtpx-deepseek-r1-0528-w8a8
 ```
 
-Run the MLA, GQA and SFA context-parallel tests on A3-560T:
-
-```text
-/nightly Kimi-K2.6-W4A8-PCP-DCP Qwen3-30B-A3B-VWN-eagle3-PCP glm-5.2-W4A8C8-DSpark-PCP --a3-560t
-```
-
 Run a single accuracy group (with all of its models):
 
 ```text
@@ -261,33 +226,17 @@ Re-trigger after fixing an issue: just push a new commit. The `synchronize` even
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
 
-## AOP Hooks (Bisect)
-
-Add `--aop_enabled` to any `/nightly` command to enable the AOP pipeline:
-
-```text
-/nightly all --aop_enabled
-```
-
-When enabled, the workflow will:
-
-1. **Capture** the test result (pass / fail).
-2. **Classify** the failure as environmental (network, infra) or code-related.
-3. **Bisect** genuine code failures to pinpoint the offending commit.
-
-This is useful for automated root-cause analysis of nightly regressions.
-
 ## Adding a New Test Case — Worked Example
 
-To add `my-new-test` to the A3 multi-card section:
+To add `my-new-test` to the A2 single-node section:
 
 1. Edit `.github/workflows/configs/nightly_config.yaml`, append under
-   `a3.multi_card.test_config`:
+   `a2.single_node.test_config`:
 
    ```yaml
      - name: my-new-test
-       os: linux-aarch64-nightly-a3-4
-       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_my_new.py
+       os: linux-aarch64-a2b3-4
+       tests: tests/e2e/nightly/single_node/ops/multicard_ops_a2/test_my_new.py
    ```
 
 2. Commit the new pytest file (`test_my_new.py`) in the same PR.
@@ -301,10 +250,10 @@ To add `my-new-test` to the A3 multi-card section:
 The workflow will:
 
 - `pr_nightly_command.yml` reads your PR's `nightly_config.yaml` and resolves
-  `my-new-test` → dispatch A3 only.
-- `Nightly-A3` is dispatched at `main`, but `setup-vars` checks out your
+  `my-new-test` → dispatch A2 only.
+- `Nightly-A2` is dispatched at `main`, but `generate-a2-matrix` checks out your
   PR commit and reads the new entry from the matrix.
-- `multi-card-tests` runs one matrix job for `my-new-test`, with
+- `single-node-tests` runs one matrix job for `my-new-test`, with
   `should_run=true`. The reusable workflow checks out your PR code (via
   `vllm_ascend_ref`) and runs your pytest.
 
@@ -318,13 +267,6 @@ The workflow will:
   users' comments are ignored.
 - To re-trigger after fixing an issue, simply push a new commit — the workflow will
   reuse the existing `/nightly` comment automatically.
-
-**My `/nightly` comment was ignored during the maintenance window.**
-
-- If the repository variable `NIGHTLY_COMMAND_BLOCK_WINDOW` is set and the current
-  Beijing time is inside the configured range, `/nightly` and `/weekly` are
-  intentionally blocked to protect the third-party scheduling tests. The bot replies
-  with the active window; retry after it ends.
 
 **Only some tests ran, not the ones I expected.**
 

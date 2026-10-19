@@ -5,9 +5,8 @@ from transformers import AutoModelForSequenceClassification
 
 from tests.e2e.conftest import HfRunner, VllmRunner
 
-pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
 
-
+@pytest.mark.skip("Probabilistic failure, need fix")
 def test_qwen_pooling_classify_correctness() -> None:
     model_name = snapshot_download("Howeee/Qwen2.5-1.5B-apeach")
 

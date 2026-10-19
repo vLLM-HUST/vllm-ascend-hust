@@ -30,7 +30,6 @@ def elastic_load(
     tp: int,
     pp: int,
     group_name: str = "netloader",
-    int8_cache: str = "no",
 ):
     """
     Loads a model using elastic loading across multiple devices.
@@ -43,7 +42,6 @@ def elastic_load(
     - tp: Tensor parallel size, indicating the number of devices for tensor parallelism.
     - pp: Pipeline parallel size, indicating the number of devices for pipeline parallelism.
     - group_name: Name of the HCCL process group.
-    - int8_cache: The type of caching for int8 parameters (HBM, DRAM, or no).
 
     Returns:
     - The loaded model if successful, otherwise None.
@@ -59,40 +57,20 @@ def elastic_load(
 
     try:
         # Initialize the interaction layer with the ElasticClient
-        with ElasticClient(
-            sources_this_device,
-            device_id,
-            model_path,
-            tp,
-            pp,
-            group_name=group_name,
-            int8_cache=int8_cache,
-        ) as client_interaction_layer:
+        with ElasticClient(sources_this_device, device_id, model_path, tp, pp, group_name) as client_interaction_layer:
             if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
                 raise RuntimeError("Failed to initialize ElasticClient: socket or server_addr is None")
             ack = client_interaction_layer.ack
             if ack is None:
                 raise RuntimeError("ElasticClient.register did not return ack")
 
-            start_p2p_load = time.perf_counter()
-            elastic_loader = P2PLoad(
-                ack[0],
-                client_interaction_layer.server_addr,
-                ack[1],
-                group_name,
-                transfer_processed_layout=int8_cache == "no",
-                transfer_shape_manifest=client_interaction_layer.transfer_shape_manifest,
-            )
+            t0 = time.perf_counter()
+            elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr, ack[1], group_name)
             model_loaded = elastic_loader.load(model=model)
             if model_loaded is None:
                 logger.error("Failed to load model")
                 return None
-            logger.info(
-                "Netloader P2P load time: %s, device_id: %s, group: %s",
-                time.perf_counter() - start_p2p_load,
-                device_id,
-                group_name,
-            )
+            logger.info("Finish elastic load (duration: %ss)", time.perf_counter() - t0)
             return model_loaded
     except Exception as e:
         logger.info("elastic_load error: %s", e)

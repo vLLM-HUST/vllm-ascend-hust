@@ -8,9 +8,9 @@ This document will show the main verification steps of the model, including supp
 
 This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, showcasing the `Qwen3-VL-8B-Instruct` model as an example for single NPU and multi-NPU deployment.
 
-!!! note
-
-    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
+:::{note}
+For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for Ascend950DT, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
+:::
 
 ## 2 Supported Features
 
@@ -22,29 +22,45 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-|  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
-|-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
-| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
-| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
-| `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
-| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
+Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas 300I DUO:
+
+- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+
+Requires 1 card on Ascend950DT series (96G × 8) node.
+
+- `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8)
+
+Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or Atlas inference products:
+
+- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
+
+Requires 1 card on Ascend950DT series (96G × 8) node.
+
+- `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
-
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "950DT Products"
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
 
-    Start the docker image on your each node.
+::::::{tab-set}
+:sync-group: hardware
+
+::::{tab-item} Ascend950DT series
+:sync: 950dt
+
+```{code-block} bash
+   :substitutions:
+
+Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO 
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -78,61 +94,73 @@ Select an image based on your machine type and start the docker image on your no
     -v /usr/lib64:/usr/lib64 \
     -itd $IMAGE bash
     ```
+```
 
-=== "A2 / A3 series"
+::::
+::::{tab-item} A2 / A3 series
+:sync: a2a3
 
-    ```bash
-    # Update the vllm-ascend image
-    # A2: quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    # A3: quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+```{code-block} bash
+   :substitutions:
 
-    docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -p 8000:8000 \
-    -it $IMAGE bash
-    ```
+# Update the vllm-ascend image
+# A2: quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# A3: quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
-=== "Atlas 300I DUO"
+docker run --rm \
+--name vllm-ascend \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
+```
 
-    ```bash
-    # Use the vllm-ascend image
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+::::
+::::{tab-item} Atlas 300I DUO
+:sync: atlas
 
-    docker run --rm \
-    --name vllm-ascend \
-    --shm-size=10g \
-    --device /dev/davinci0 \
-    --device /dev/davinci1 \
-    --device /dev/davinci2 \
-    --device /dev/davinci3 \
-    --device /dev/davinci4 \
-    --device /dev/davinci5 \
-    --device /dev/davinci6 \
-    --device /dev/davinci7 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -p 8000:8000 \
-    -it $IMAGE bash
-    ```
+```{code-block} bash
+   :substitutions:
+
+# Use the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+
+docker run --rm \
+--name vllm-ascend \
+--shm-size=10g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
+```
+
+::::
+::::::
 
 **Installation Verification:**
 
@@ -170,13 +198,14 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    pip install -e .
    ```
 
-!!! note
+:::{note}
+Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
 
-    Atlas 300I DUO does not support `triton` or `triton-ascend`. Source installation may pull them in automatically; uninstall them manually before running:
+```bash
+pip uninstall -y triton-ascend triton
+```
 
-    ```bash
-    pip uninstall -y triton-ascend triton
-    ```
+:::
 
 **Installation Verification:**
 
@@ -186,26 +215,32 @@ pip show vllm vllm-ascend
 
 Expected result: The version information for both packages is displayed, confirming a successful installation.
 
-!!! note
+:::{note}
+If deploying a multi-node environment, set up the environment on each node.
+:::
 
-    If deploying a multi-node environment, set up the environment on each node.
+For more details, please refer to the [Installation Guide](../../installation.md).
 
-For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
-
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Run docker container to start the vLLM server on single-NPU:
 
-=== "950DT Products"
+::::::{tab-set}
+:sync-group: hardware
 
-    ```bash
+::::{tab-item} Ascend950DT series
+:sync: 950dt
+
+```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
       --host 0.0.0.0 \
       --port $2 \
@@ -213,7 +248,7 @@ Run docker container to start the vLLM server on single-NPU:
       --served-model-name qwen3vl \
       --no-enable-prefix-caching \
       --data-parallel-size $3 \
-      --tensor-parallel-size $4 \
+      --tensor-parallel-size $4 \ 
       --trust-remote-code \
       --max-num-seqs 128 \
       --max-model-len 32768 \
@@ -222,16 +257,21 @@ Run docker container to start the vLLM server on single-NPU:
       --async-scheduling \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
       --mm-processor-cache-gb 0
-    ```
+```
 
-=== "A2 / A3 series"
+::::
 
-    ```bash
+::::{tab-item} A2 / A3 series
+:sync: a2a3
+
+```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --host 0.0.0.0 \
     --port $2 \
@@ -239,7 +279,7 @@ Run docker container to start the vLLM server on single-NPU:
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
-    --tensor-parallel-size $4 \
+    --tensor-parallel-size $4 \ 
     --trust-remote-code \
     --max-num-seqs 128 \
     --max-model-len 32768 \
@@ -247,18 +287,21 @@ Run docker container to start the vLLM server on single-NPU:
     --gpu-memory-utilization 0.91 \
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
-    --mm-processor-cache-gb 0
+    --mm-processor-cache-gb 0 
+```
 
-    ```
+::::
+::::{tab-item} Atlas 300I DUO
+:sync: atlas
 
-=== "Atlas 300I DUO"
-
-    ```bash
+```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export ASCEND_RT_VISIBLE_DEVICES=$1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
     --max_model_len 16384 \
@@ -268,7 +311,7 @@ Run docker container to start the vLLM server on single-NPU:
     --served-model-name qwen3vl \
     --no-enable-prefix-caching \
     --data-parallel-size $3 \
-    --tensor-parallel-size $4 \
+    --tensor-parallel-size $4 \ 
     --trust-remote-code \
     --max-num-seqs 128 \
     --max-model-len 32768 \
@@ -277,17 +320,19 @@ Run docker container to start the vLLM server on single-NPU:
     --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}' \
-    --mm-processor-cache-gb 0
+    --mm-processor-cache-gb 0 
+```
 
-    ```
+:::{note}
+On Atlas 300I DUO:
 
-    !!! note
+- Only `float16` dtype is supported.
+- Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
+- `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
+:::
 
-        On Atlas 300I DUO:
-
-        - Only `float16` dtype is supported.
-        - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, replace `--compilation-config` with `--enforce-eager`.
-        - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on Atlas 300I DUO.
+::::
+::::::
 
 Key Parameter Descriptions:
 
@@ -334,60 +379,69 @@ The accuracy of some models is already within our CI monitoring scope, including
 
 - `Qwen3-VL-8B-Instruct`
 
-=== "A2 / A3 series"
+::::::{tab-set}
+:sync-group: hardware
 
-    **Using Language Model Evaluation Harness**
+::::{tab-item} A2 / A3 series
+:sync: a2a3
 
-    As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
+**Using Language Model Evaluation Harness**
 
-    1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
-        ```shell
-        pip install lm_eval
-        ```
+1. Refer to [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for more details on `lm_eval` installation.
 
-    2. Run `lm_eval` to execute the accuracy evaluation.
+    ```shell
+    pip install lm_eval
+    ```
 
-        ```shell
-        lm_eval \
-            --model vllm-vlm \
-            --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
-            --tasks mmmu_val \
-            --batch_size 32 \
-            --apply_chat_template \
-            --trust_remote_code \
-            --output_path ./results
-        ```
+2. Run `lm_eval` to execute the accuracy evaluation.
 
-    3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
+    ```shell
+    lm_eval \
+        --model vllm-vlm \
+        --model_args pretrained=Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+        --tasks mmmu_val \
+        --batch_size 32 \
+        --apply_chat_template \
+        --trust_remote_code \
+        --output_path ./results
+    ```
 
-    | Tasks    | Value  | Stderr |
-    | -------- | ------ | ------ |
-    | mmmu_val | 0.5389 | 0.0159 |
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc3` for reference only.
 
-=== "Atlas 300I DUO"
+| Tasks    | Value  | Stderr |
+| -------- | ------ | ------ |
+| mmmu_val | 0.5389 | 0.0159 |
 
-    **Using AISBench**
+::::
+::::{tab-item} Atlas 300I DUO
+:sync: atlas
 
-    Take the `text_vqa` dataset as an example, and run accuracy evaluation of `Qwen3-VL-8B-Instruct`.
+**Using AISBench**
 
-    1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for installation, dataset download, and configuration details.
+Take the `text_vqa` dataset as an example, and run accuracy evaluation of `Qwen3-VL-8B-Instruct`.
 
-    2. Run `ais_bench` to execute the accuracy evaluation.
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for installation, dataset download, and configuration details.
 
-        ```shell
-        ais_bench --models vllm_api_general_chat --datasets textvqa_gen_base64 --mode all --debug
-        ```
+2. Run `ais_bench` to execute the accuracy evaluation.
 
-    3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0rc1` for reference only.
+    ```shell
+    ais_bench --models vllm_api_general_chat --datasets textvqa_gen_base64 --mode all --debug
+    ```
 
-    | dataset  | metric   | mode | vllm-api-general-chat |
-    | -------- | -------- | ---- | --------------------- |
-    | text_vqa | accuracy | gen  | 80.57                 |
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.23.0rc1` for reference only.
+
+| dataset  | metric   | mode | vllm-api-general-chat |
+| -------- | -------- | ---- | --------------------- |
+| text_vqa | accuracy | gen  | 80.57                 |
+
+::::
+::::::
 
 ## 8 Performance Evaluation
 
-### 8.1 Using vLLM Benchmark
+### Using vLLM Benchmark
 
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -420,7 +474,7 @@ After several minutes, you can get the performance evaluation result.
 |Long Context<br>(128k, with prefix cache)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution text inputs|
 |Multimodal<br>(1080p)|Single-Node Mixed|1 (A3)|Qwen3-VL-8B-Instruct|tp2 for high-resolution visual inputs|
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
@@ -446,4 +500,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

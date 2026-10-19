@@ -58,3 +58,4 @@ add_ops_compile_options(
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE rms_norm_dynamic_quant ACLNNTYPE aclnn)
 endif()
+

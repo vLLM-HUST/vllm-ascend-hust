@@ -18,9 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-|  Weight Version     | Hardware Requirements | Download Links |
-|---------------------|-----------------------|----------------|
-| `PaddleOCR-VL-0.9B` | 1 Atlas 800 A3 (128GB × 8) nodes or 1 Atlas 800 A2 (64GB × 8) nodes or 1 Atlas 300I DUO (48GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL) \| [Hugging Face](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) |
+- `PaddleOCR-VL-0.9B`: [PaddleOCR-VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)
 
 It is recommended to download the model weights to the cache directory and set `VLLM_USE_MODELSCOPE=True` to load the model automatically. If you have downloaded the weights to a local directory, update the `MODEL_PATH` variable in the deployment script accordingly.
 
@@ -30,61 +28,75 @@ It is recommended to download the model weights to the cache directory and set `
 
 You can use our official docker image to run `PaddleOCR-VL` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-=== "A2 series"
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=1g \
-        --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
+:::::{tab-set}
+:sync-group: install
 
-=== "Atlas 300I DUO"
+::::{tab-item} A2 series
+:sync: A2
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=1g \
-        --net=host \
-        --device /dev/davinci0 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -it $IMAGE bash
-    ```
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+
+::::
+
+::::{tab-item} Atlas 300I DUO
+:sync: atlas300
+
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+```
+
+::::
+:::::
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-### 4.2 Source Code Installation {: #42-source-code-installation }
+### 4.2 Source Code Installation
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
@@ -98,72 +110,83 @@ Follow these steps to start the inference service:
 
 Startup Command:
 
-=== "A2 series"
+:::::{tab-set}
+:sync-group: install
 
-    ```bash
-    #!/bin/sh
-    export VLLM_USE_MODELSCOPE=True
-    export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
-    export TASK_QUEUE_ENABLE=1
-    export CPU_AFFINITY_CONF=1
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+::::{tab-item} A2 series
+:sync: A2
 
-    vllm serve ${MODEL_PATH} \
-              --max-num-batched-tokens 16384 \
-              --served-model-name PaddleOCR-VL-0.9B \
-              --trust-remote-code \
-              --no-enable-prefix-caching \
-              --mm-processor-cache-gb 0 \
-              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-              --additional_config '{"enable_cpu_binding":true}' \
-              --port 8000
-    ```
-    Key Parameter Descriptions:
+```bash
+#!/bin/sh
+export VLLM_USE_MODELSCOPE=True
+export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+export TASK_QUEUE_ENABLE=1
+export CPU_AFFINITY_CONF=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
-    - `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
-    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
-    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
+vllm serve ${MODEL_PATH} \
+          --max-num-batched-tokens 16384 \
+          --served-model-name PaddleOCR-VL-0.9B \
+          --trust-remote-code \
+          --no-enable-prefix-caching \
+          --mm-processor-cache-gb 0 \
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+          --additional_config '{"enable_cpu_binding":true}' \
+          --port 8000
+```
 
-=== "Atlas 300I DUO"
+Key Parameter Descriptions:
 
-    ```bash
-    #!/bin/sh
-    export VLLM_USE_MODELSCOPE=True
-    export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
-    export TASK_QUEUE_ENABLE=1
-    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+- `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
+- `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
-    vllm serve ${MODEL_PATH} \
-              --max_model_len 16384 \
-              --served-model-name PaddleOCR-VL-0.9B \
-              --trust-remote-code \
-              --no-enable-prefix-caching \
-              --mm-processor-cache-gb 0 \
-              --dtype float16 \
-              --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-              --additional_config '{"enable_cpu_binding":true}' \
-              --port 8000
-    ```
+::::
 
-    !!! note
+::::{tab-item} Atlas 300I DUO
+:sync: atlas300
 
-        On Atlas 300I DUO:
+```bash
+#!/bin/sh
+export VLLM_USE_MODELSCOPE=True
+export MODEL_PATH="PaddlePaddle/PaddleOCR-VL"
+export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
-        - Only `float16` dtype is supported.
-        - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
+vllm serve ${MODEL_PATH} \
+          --max_model_len 16384 \
+          --served-model-name PaddleOCR-VL-0.9B \
+          --trust-remote-code \
+          --no-enable-prefix-caching \
+          --mm-processor-cache-gb 0 \
+          --dtype float16 \
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+          --additional_config '{"enable_cpu_binding":true}' \
+          --port 8000
+```
 
-    Key Parameter Descriptions:
+:::{note}
 
-    - `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
-    - `--dtype float16` specifies the model dtype. On Atlas 300I DUO, only `float16` is supported.
-    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
-    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
+On Atlas 300I DUO:
 
-Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
+- Only `float16` dtype is supported.
+- Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
+:::
+
+Key Parameter Descriptions:
+
+- `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+- `--dtype float16` specifies the model dtype. On Atlas 300I DUO, only `float16` is supported.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance. On Atlas 300I DUO, `fuse_norm_quant` in graph compilation is disabled by default in `--additional_config`.
+
+::::
+:::::
+
+Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -175,61 +198,72 @@ Not supported yet.
 
 In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-0.9B model. Typically, we also need to integrate the PP-DocLayoutV2 model to fully unleash the capabilities of the PaddleOCR-VL model, making it more consistent with the examples provided by the official PaddlePaddle documentation.
 
-!!! note
+:::{note}
+Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
+:::
 
-    Use separate virtual environments for VLLM and PP-DocLayoutV2 to prevent dependency conflicts.
+:::::{tab-set}
+:sync-group: install
 
-=== "A2 series"
+::::{tab-item} A2 series
+:sync: A2
 
-    The A2 series device supports inference using the PaddlePaddle framework.
+The A2 series device supports inference using the PaddlePaddle framework.
 
-    1. Pull the PaddlePaddle-compatible CANN image
+1. Pull the PaddlePaddle-compatible CANN image
 
-        ```bash
-        docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
-        ```
+    ```bash
+    docker pull ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-aarch64-gcc84
+    ```
 
-        Start the container using the following command:
+    Start the container using the following command:
 
-        ```bash
-        docker run -it --name paddle-npu-dev -v $(pwd):/work \
-            --privileged --network=host --shm-size=128G -w=/work \
-            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-            -v /usr/local/dcmi:/usr/local/dcmi \
-            -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
-            ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
-        ```
+    ```bash
+    docker run -it --name paddle-npu-dev -v $(pwd):/work \
+        --privileged --network=host --shm-size=128G -w=/work \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -e ASCEND_RT_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
+        ccr-2vdh3abv-pub.cnc.bj.baidubce.com/device/paddle-npu:cann800-ubuntu20-npu-910b-base-$(uname -m)-gcc84 /bin/bash
+    ```
 
-    2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+2. Install [PaddlePaddle](https://www.paddlepaddle.org.cn/install/quick?docurl=undefined) and [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
 
-        ```bash
-        python -m pip install paddlepaddle==3.2.0
-        wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-        pip install paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-        python -m pip install -U "paddleocr[doc-parser]"
-        pip install safetensors
-        ```
+    ```bash
+    python -m pip install paddlepaddle==3.2.0
+    wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    pip install paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+    python -m pip install -U "paddleocr[doc-parser]"
+    pip install safetensors
+    ```
 
-        !!! note
+    :::{note}
+    The OpenCV component may be missing:
 
-                The OpenCV component may be missing:
+    ```bash
+    apt-get update
+    apt-get install -y libgl1 libglib2.0-0
+    ```
 
-                ```bash
-                apt-get update
-                apt-get install -y libgl1 libglib2.0-0
-                ```
+    CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
 
-                CANN-8.0.0 does not support some versions of NumPy and OpenCV. It is recommended to install the specified versions.
+    ```bash
+    python -m pip install numpy==1.26.4
+    python -m pip install opencv-python==3.4.18.65
+    ```
 
-                ```bash
-                python -m pip install numpy==1.26.4
-                python -m pip install opencv-python==3.4.18.65
-                ```
+    :::
 
-=== "Atlas 300I DUO"
+::::
 
-    The Atlas 300I DUO supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+::::{tab-item} Atlas 300I DUO
+:sync: atlas300
+
+The Atlas 300I DUO supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+
+::::
+:::::
 
 #### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
@@ -362,13 +396,13 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 #### 9.2.1 General Tuning Reference
 
-For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
+For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
-Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 
 - **Q: What are the deployment requirements for Atlas 300I DUO?**
 
@@ -376,4 +410,8 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What should I do if I encounter dependency conflicts during installation on Atlas 300I DUO?**
 
-  A: You may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.
+  A: Uninstall `triton` and `triton-ascend` before starting the service:
+
+  ```bash
+  pip uninstall -y triton triton-ascend
+  ```

@@ -8,11 +8,12 @@ This document guides you to conduct accuracy testing using [lm-eval][1].
 
 You can run a docker container to start the vLLM server on a single NPU:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -117,12 +118,12 @@ export USE_MODELSCOPE_HUB=0
 pip install lm-eval[api]
 ```
 
-!!! note
-
-    The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
-    cause lm-eval to download datasets from ModelScope instead of HuggingFace.
-    Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
-    fetch datasets from HuggingFace correctly.
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -153,11 +154,12 @@ The results in Markdown format are as follows:
 
 You can run docker container on a single NPU:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --shm-size=1g \
@@ -188,12 +190,12 @@ export USE_MODELSCOPE_HUB=0
 pip install lm-eval
 ```
 
-!!! note
-
-    The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
-    cause lm-eval to download datasets from ModelScope instead of HuggingFace.
-    Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
-    fetch datasets from HuggingFace correctly.
+:::{note}
+The Docker container is launched with `VLLM_USE_MODELSCOPE=True`, which may
+cause lm-eval to download datasets from ModelScope instead of HuggingFace.
+Setting `USE_MODELSCOPE_HUB=0` disables this behavior so that lm-eval can
+fetch datasets from HuggingFace correctly.
+:::
 
 Run the following command:
 
@@ -237,7 +239,7 @@ cd lm_eval/tasks/mmlu/default
 Set [gsm8k.yaml][3] as follows:
 
 ```yaml
-{% raw %}tag:
+tag:
   - math_word_problems
 task: gsm8k
 
@@ -294,13 +296,13 @@ filter_list:
         regex_pattern: "(-?[$0-9.,]{2,})|(-?[0-9]+)"
       - function: "take_first"
 metadata:
-  version: 3.0{% endraw %}
+  version: 3.0
 ```
 
 Set [_default_template_yaml][4] as follows:
 
 ```yaml
-{% raw %}# set dataset_path according to the downloaded dataset
+# set dataset_path according to the downloaded dataset
 dataset_path: /root/.cache/mmlu
 test_split: test
 fewshot_split: dev
@@ -317,7 +319,7 @@ metric_list:
 metadata:
   version: 1.0
 dataset_kwargs:
-  trust_remote_code: true{% endraw %}
+  trust_remote_code: true
 ```
 
 You can see more usage on [Lm-eval Docs][5].

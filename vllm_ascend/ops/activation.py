@@ -25,7 +25,7 @@ from vllm.model_executor.layers.activation import (
     SwigluStepAndMul,
 )
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 class AscendQuickGELU(QuickGELU):
@@ -36,19 +36,23 @@ class AscendQuickGELU(QuickGELU):
 
 class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         out = torch_npu.npu_swiglu(x)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 
 class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        # Dispatched through the device adaptor: A5 and 310P keep an eager fallback here.
-        out = DeviceOperator.clipped_swiglu(
-            x,
-            swiglu_limit=self.swiglu_limit,
-            swiglu_alpha=self.alpha,
-            swiglu_beta=self.beta,
-        )
+        weight_prefetch_method = get_weight_prefetch_method()
+        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
+        d = x.shape[-1] // 2
+        gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
+        up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
+        x = torch.cat([gate, up], dim=-1)
+        out = torch_npu.npu_swiglu(x)
+        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 
@@ -68,20 +72,6 @@ class AscendSwigluStepAndMul:
         if limit is None:
             raise ValueError("SwigluStepAndMul requires limit to be set.")
 
-        # Triton fused path: 1D-grid row-loop kernel that fuses
-        # silu + clamp + mul into a single launch (see
-        # vllm_ascend/ops/triton/activation/swiglustep.py). Numerically
-        # equivalent to forward_native below.
-        from vllm.triton_utils import HAS_TRITON
-
-        if HAS_TRITON:
-            from vllm_ascend.ops.triton.activation.swiglustep import (
-                swiglustep_forward_triton,
-            )
-
-            return swiglustep_forward_triton(x, limit)
-
-        # Fallback when triton is unavailable: vllm's native silu+clamp+mul.
         class MinimalSwigluStepAndMul:
             def __init__(self):
                 self.limit = limit

@@ -1,4 +1,5 @@
 import torch
+import vllm.envs as envs_vllm
 from flash_attn_npu_v3 import flash_attn_with_kvcache as _fa3_fn  # type: ignore[import-not-found]
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 
@@ -14,7 +15,7 @@ class AscendFABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        return "CUSTOM" if not envs_vllm.VLLM_USE_V2_MODEL_RUNNER else "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AscendFAImpl"]:
@@ -35,7 +36,7 @@ class AscendFABackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
+    def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
 
 
@@ -100,7 +101,7 @@ class AscendFAImpl(AscendAttentionBackendImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        kv_cache: tuple[torch.Tensor],
         attn_metadata,
         output: torch.Tensor,
     ):
@@ -119,20 +120,17 @@ class AscendFAImpl(AscendAttentionBackendImpl):
                     attn_metadata.block_tables[:num_decodes, :],
                     attn_metadata.query_start_loc[: num_decodes + 1],
                     attn_metadata.seq_lens[:num_decodes].npu(),
-                    num_decode_tokens > num_decodes,
+                    False,
                     max(attn_metadata.seq_lens[:num_decodes]),
                 )
             )
 
         if num_prefills > 0:
-            prefill_query_start_loc = attn_metadata.query_start_loc
-            if num_decode_tokens > 0:
-                prefill_query_start_loc = prefill_query_start_loc[num_decodes:] - num_decode_tokens
             outputs.append(
                 self._flash_attn_with_kvcache(
                     query[num_decode_tokens:],
-                    attn_metadata.block_tables[num_decodes:, :],
-                    prefill_query_start_loc,
+                    attn_metadata.block_tables[num_decode_tokens:, :],
+                    attn_metadata.query_start_loc[num_decodes:],
                     attn_metadata.seq_lens[num_decodes:].npu(),
                     True,  # enable causal for prefill
                     max(attn_metadata.seq_lens[num_decodes:]),

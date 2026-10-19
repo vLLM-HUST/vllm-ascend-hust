@@ -2,12 +2,6 @@
 # VSCode
 .vscode/
 
-# MkDocs build output
-site/
-
-# Generated Chinese docs (built from .po files)
-docs/source/zh/
-
 # egg-info
 vllm_ascend.egg-info/
 
@@ -17,7 +11,6 @@ vllm_ascend.egg-info/
 # Linting
 actionlint
 shellcheck*/
-gitleaks
 
 
 # Python gitignore
@@ -223,18 +216,10 @@ kernel_meta/
 fusion_result.json
 csrc/output/
 csrc/third_party/
-/csrc/build_cache/
 
-# AI agent local working files
-# (note: .agents/ holds shared, versioned skills and is intentionally tracked)
-.claude/
+# claude code skills
+.claude/skills/*
+
 .codegraph/
-.zcode/
-.gemini/
-.opencode/
-.cursor/
-.aider*
-.windsurf/
 
-# local build cache
 .vllm_ascend/

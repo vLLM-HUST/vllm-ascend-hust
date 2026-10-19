@@ -1,7 +1,6 @@
 ---
 name: vllm-ascend-release
 description: "End-to-end release management skill for vLLM Ascend. Creates release checklist issues, identifies critical bugs, runs functional tests, invokes release note generation, and guides through the complete release process."
-disable-model-invocation: true
 ---
 
 # vLLM Ascend Release Skill
@@ -495,7 +494,7 @@ gh pr create --repo vllm-project/vllm-ascend \
 | `docs/source/user_guide/release_notes.md` | Add new release notes |
 | `docs/source/community/versioning_policy.md` | Compatibility matrix, release window |
 | `docs/source/community/contributors.md` | New contributors |
-| `mkdocs.yml` | Package version (in `extra:` block) |
+| `docs/conf.py` | Package version |
 | `.github/workflows/schedule_image_build_and_push.yaml` | Config |
 
 ### 7.2 Version Update Script
@@ -673,7 +672,7 @@ vLLM Ascend v0.18.0rc1版本发布🎉 此版本是针对vLLM v0.18.0系列版�
 
 🥳 本版本新增9位新开发者，感谢社区开发者的持续贡献！
 💥 C8(INT8 KV cache)支持GQA attention模型，同时适配DeepSeek-V3.1 PD分离场景
-💥 DeepSeek模型通过新MLA算子支持Ascend 950PR&950DT 系列产品
+💥 DeepSeek模型通过新MLA算子支持Ascend 950系列产品
 🆕 Flash Comm V1支持VL模型的MLA，解除多模态服务限制
 🆕 支持speculative decoding中target和draft模型使用不同attention backend
 🆕 VL MoE模型支持SP，`sp_threshold`替换为vLLM原生`sp_min_token_num`

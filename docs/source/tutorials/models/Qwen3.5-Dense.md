@@ -20,121 +20,134 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
-| Qwen3.5-4B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
-| Qwen3.5-9B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
-| Qwen3.5-2B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-2B-W8A8-310P) |
-| Qwen3.5-4B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-4B-W8A8-310P) |
-| Qwen3.5-9B-W8A8-310P | INT8 | Atlas 300I DUO or Atlas 200I Pro | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-9B-W8A8-310P) |
+| Qwen3.5-2B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
+| Qwen3.5-4B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
+| Qwen3.5-9B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
-
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. As a minimum-version requirement, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image. For Atlas 200I Pro on openEuler, use the matching `-310p-openeuler` image.
+It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image. For Atlas 300I DUO and Atlas 200I Pro on Ubuntu, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image). For Atlas 200I Pro on openEuler, use `vllm-ascend:nightly-releases-v0.23.0-310p-openeuler` (or a later `-310p-openeuler` image).
 
-=== "Atlas 300I DUO"
+:::::::{tab-set}
 
-    Start the docker image on each node.
+::::::{tab-item} Atlas 300I DUO
 
-    ```bash
-    export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
-    docker run --rm \
-        --name vllm-ascend \
-        --shm-size=10g \
-        --device /dev/davinci0 \
-        --device /dev/davinci1 \
-        --device /dev/davinci2 \
-        --device /dev/davinci3 \
-        --device /dev/davinci4 \
-        --device /dev/davinci5 \
-        --device /dev/davinci6 \
-        --device /dev/davinci7 \
-        --device /dev/davinci_manager \
-        --device /dev/devmm_svm \
-        --device /dev/hisi_hdc \
-        -v /usr/local/dcmi:/usr/local/dcmi \
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-        -v /etc/ascend_install.info:/etc/ascend_install.info \
-        -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
-        -it $IMAGE bash
-    ```
+Start the docker image on each node.
 
-=== "Atlas 200I Pro"
+```{code-block} bash
+  :substitutions:
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8080:8080 \
+    -it $IMAGE bash
+```
 
-    Start the docker image on each node. Adjust `--device=/dev/davinci0` according to the NPU ID you want to use.
+::::::
 
-    === "Ubuntu 24.04"
+::::::{tab-item} Atlas 200I Pro
 
-        ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+Start the docker image on each node. Adjust `--device=/dev/davinci0` according to the NPU ID you want to use.
 
-        docker run --rm \
-        --privileged \
-        --name vllm-ascend \
-        --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
-        --device=/dev/ascend_manager \
-        --device=/dev/user_config \
-        -v /etc/sys_version.conf:/etc/sys_version.conf \
-        -v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
-        -v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
-        -v /var/dmp_daemon:/var/dmp_daemon \
-        -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
-        -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-        -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
-        -v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
-        -v /etc/slog.conf:/etc/slog.conf \
-        -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
-        -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
-        -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
-        -it $IMAGE bash
-        ```
+:::::{tab-set}
 
-    === "openEuler 24.03"
+::::{tab-item} Ubuntu 24.04
+:selected:
 
-        ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 
-        docker run --rm \
-        --privileged \
-        --name vllm-ascend \
-        --shm-size=10g \
-        --device=/dev/davinci0:/dev/davinci0 \
-        --device=/dev/davinci_manager \
-        --device=/dev/ascend_manager \
-        --device=/dev/user_config \
-        -v /etc/sys_version.conf:/etc/sys_version.conf \
-        -v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
-        -v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
-        -v /var/dmp_daemon:/var/dmp_daemon \
-        -v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2 \
-        -v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
-        -v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
-        -v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2 \
-        -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
-        -v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
-        -v /etc/slog.conf:/etc/slog.conf \
-        -v /var/slogd:/var/slogd \
-        -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
-        -v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
-        -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
-        -it $IMAGE bash
-        ```
+docker run --rm \
+--privileged \
+--name vllm-ascend \
+--shm-size=10g \
+--device=/dev/davinci0:/dev/davinci0 \
+--device=/dev/davinci_manager \
+--device=/dev/ascend_manager \
+--device=/dev/user_config \
+-v /etc/sys_version.conf:/etc/sys_version.conf \
+-v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
+-v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
+-v /var/dmp_daemon:/var/dmp_daemon \
+-v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
+-v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
+-v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+-v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
+-v /usr/lib/aarch64-linux-gnu/libyaml-0.so.2:/usr/lib64/libyaml-0.so.2 \
+-v /etc/slog.conf:/etc/slog.conf \
+-v /var/slogd:/var/slogd \
+-v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+-v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
+-v /root/.cache:/root/.cache \
+-p 8080:8080 \
+-it $IMAGE bash
+```
+
+::::
+
+::::{tab-item} openEuler 24.03
+
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p-openeuler
+
+docker run --rm \
+--privileged \
+--name vllm-ascend \
+--shm-size=10g \
+--device=/dev/davinci0:/dev/davinci0 \
+--device=/dev/davinci_manager \
+--device=/dev/ascend_manager \
+--device=/dev/user_config \
+-v /etc/sys_version.conf:/etc/sys_version.conf \
+-v /etc/ld.so.conf.d/mind_so.conf:/etc/ld.so.conf.d/mind_so.conf \
+-v /etc/hdcBasic.cfg:/etc/hdcBasic.cfg \
+-v /var/dmp_daemon:/var/dmp_daemon \
+-v /usr/lib64/libsemanage.so.2:/usr/lib64/libsemanage.so.2 \
+-v /usr/lib64/libmmpa.so:/usr/lib64/libmmpa.so \
+-v /usr/lib64/libcrypto.so.1.1:/usr/lib64/libcrypto.so.1.1 \
+-v /usr/lib64/libyaml-0.so.2.0.9:/usr/lib64/libyaml-0.so.2 \
+-v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+-v /usr/lib64/libstackcore.so:/usr/lib64/libstackcore.so \
+-v /etc/slog.conf:/etc/slog.conf \
+-v /var/slogd:/var/slogd \
+-v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64 \
+-v /usr/lib64/libtensorflow.so:/usr/lib64/libtensorflow.so \
+-v /root/.cache:/root/.cache \
+-p 8080:8080 \
+-it $IMAGE bash
+```
+
+::::
+:::::
+
+::::::
+:::::::
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command. The expected result is that the container `vllm-ascend` is listed with status `Up`, confirming the docker installation is successful.
 
@@ -150,15 +163,15 @@ If you don't want to use the docker image as above, you can also build all from 
     pip install -e .
     ```
 
-    For the complete installation steps, refer to [installation](../../getting_started/installation.md).
+    For the complete installation steps, refer to [installation](../../installation.md).
 
-    !!! note
+    ````{note}
+    On Atlas 300I DUO and Atlas 200I Pro, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
 
-        On Atlas 300I DUO and Atlas 200I Pro, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
-
-        ```bash
-        pip uninstall -y triton-ascend triton
-        ```
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
+    ````
 
 To verify the source code installation, run the following command and confirm the displayed version matches the one you installed:
 
@@ -168,7 +181,7 @@ pip show vllm-ascend
 
 Expected result: The version information of `vllm-ascend` is displayed, confirming a successful installation.
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
@@ -178,92 +191,98 @@ Single-node deployment completes both Prefill and Decode within the same node. `
 
 The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` with your local directory if needed.
 
-=== "Qwen3.5-2B"
+:::::{tab-set}
 
-    Startup Command:
+::::{tab-item} Qwen3.5-2B
 
-    ```bash
-    #!/bin/sh
-    # Load model from ModelScope to speed up download
-    export VLLM_USE_MODELSCOPE=True
+Startup Command:
 
-    # Model weight path; can be a ModelScope model id or a local directory path
-    # Ensure the model path matches the directory recorded during download
-    export MODEL_PATH=Qwen/Qwen3.5-2B
+```bash
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
 
-    vllm serve $MODEL_PATH \
-    --host 127.0.0.1 \
-    --port 8080 \
-    --tensor-parallel-size 1 \
-    --served-model-name qwen3.5 \
-    --max-num-seqs 32 \
-    --max-model-len 16384 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.90 \
-    --mamba-ssm-cache-dtype float16 \
-    --dtype float16 \
-    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
-    ```
+# Model weight path; can be a ModelScope model id or a local directory path
+export MODEL_PATH=Qwen/Qwen3.5-2B
 
-=== "Qwen3.5-4B"
+vllm serve $MODEL_PATH \
+--host 127.0.0.1 \
+--port 1025 \
+--tensor-parallel-size 1 \
+--served-model-name qwen3.5 \
+--max-num-seqs 32 \
+--max-model-len 16384 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--mamba-ssm-cache-dtype float16 \
+--dtype float16 \
+--speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,4,8,16]}' \
+--additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+```
 
-    Startup Command:
+::::
 
-    ```bash
-    #!/bin/sh
-    # Load model from ModelScope to speed up download
-    export VLLM_USE_MODELSCOPE=True
+::::{tab-item} Qwen3.5-4B
 
-    # Model weight path; can be a ModelScope model id or a local directory path
-    # Ensure the model path matches the directory recorded during download
-    export MODEL_PATH=Qwen/Qwen3.5-4B
+Startup Command:
 
-    vllm serve $MODEL_PATH \
-    --host 127.0.0.1 \
-    --port 8080 \
-    --tensor-parallel-size 1 \
-    --served-model-name qwen3.5 \
-    --max-num-seqs 32 \
-    --max-model-len 16384 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.90 \
-    --mamba-ssm-cache-dtype float16 \
-    --dtype float16 \
-    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
-    ```
+```bash
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
 
-=== "Qwen3.5-9B"
+# Model weight path; can be a ModelScope model id or a local directory path
+export MODEL_PATH=Qwen/Qwen3.5-4B
 
-    Startup Command:
+vllm serve $MODEL_PATH \
+--host 127.0.0.1 \
+--port 1025 \
+--tensor-parallel-size 1 \
+--served-model-name qwen3.5 \
+--max-num-seqs 32 \
+--max-model-len 16384 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--mamba-ssm-cache-dtype float16 \
+--dtype float16 \
+--speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,4,8,16]}' \
+--additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+```
 
-    ```bash
-    #!/bin/sh
-    # Load model from ModelScope to speed up download
-    export VLLM_USE_MODELSCOPE=True
+::::
 
-    # Model weight path; can be a ModelScope model id or a local directory path
-    # Ensure the model path matches the directory recorded during download
-    export MODEL_PATH=Qwen/Qwen3.5-9B
+::::{tab-item} Qwen3.5-9B
 
-    vllm serve $MODEL_PATH \
-    --host 127.0.0.1 \
-    --port 8080 \
-    --tensor-parallel-size 1 \
-    --served-model-name qwen3.5 \
-    --max-num-seqs 32 \
-    --max-model-len 16384 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.90 \
-    --mamba-ssm-cache-dtype float16 \
-    --dtype float16 \
-    --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
-    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
-    ```
+Startup Command:
+
+```bash
+#!/bin/sh
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+
+# Model weight path; can be a ModelScope model id or a local directory path
+export MODEL_PATH=Qwen/Qwen3.5-9B
+
+vllm serve $MODEL_PATH \
+--host 127.0.0.1 \
+--port 1025 \
+--tensor-parallel-size 1 \
+--served-model-name qwen3.5 \
+--max-num-seqs 32 \
+--max-model-len 16384 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--mamba-ssm-cache-dtype float16 \
+--dtype float16 \
+--speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,4,8,16]}' \
+--additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+```
+
+::::
+:::::
 
 Key Parameter Descriptions:
 
@@ -279,7 +298,7 @@ Key Parameter Descriptions:
     - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
 - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on these platforms.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -293,12 +312,12 @@ If the service starts successfully, the following startup log will be displayed:
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). If you used `--port 8080` or `-p 8080:8080`, adjust the URL accordingly.
+After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). If you used `--port 1025` or `-p 8080:8080`, adjust the URL accordingly.
 
 **Completions API:**
 
 ```bash
-curl http://127.0.0.1:8080/v1/completions \
+curl http://127.0.0.1:1025/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -311,7 +330,7 @@ curl http://127.0.0.1:8080/v1/completions \
 **Chat Completions API:**
 
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:1025/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -328,7 +347,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 ## 7 Accuracy Evaluation
 
-### 7.1 Using AISBench
+### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -336,7 +355,7 @@ Expected Result: The service returns HTTP 200 OK. The JSON response contains the
 
 **Accuracy Evaluation Config File:**
 
-```bash
+```python
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
 from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
@@ -351,7 +370,7 @@ models = [
         request_rate=0,
         retry=2,
         host_ip="127.0.0.1",
-        host_port=8080,
+        host_port=1025,
         max_out_len=4096,
         batch_size=16,
         trust_remote_code=False,
@@ -376,7 +395,7 @@ models = [
 
 ## 8 Performance Evaluation
 
-### 8.1 Using AISBench
+### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -392,8 +411,8 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
+For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

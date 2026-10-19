@@ -13,7 +13,7 @@
  * \brief
  */
 #include "tiling_base/error_log.h"
-#include "graph/types.h"
+#include "util/shape_util.h"
 #include "register/op_impl_registry.h"
 
 static constexpr int IDX_0 = 0;
@@ -21,6 +21,7 @@ static constexpr int IDX_1 = 1;
 static constexpr int IDX_2 = 2;
 
 using namespace ge;
+using namespace Ops::Base;
 
 namespace ops {
 
@@ -46,11 +47,8 @@ static ge::graphStatus InferShape4AddRmsNormBias(gert::InferShapeContext* contex
     size_t xDimNum = x1Shape->GetDimNum();
     size_t gammaDimNum = gammaShape->GetDimNum();
 
-    // Keep unknown-rank inference local without an opsbase runtime dependency.
-    if ((xDimNum == 1 && x1Shape->GetDim(0) == ge::UNKNOWN_DIM_NUM) ||
-        (gammaDimNum == 1 && gammaShape->GetDim(0) == ge::UNKNOWN_DIM_NUM)) {
-        rstdShape->SetDimNum(1);
-        rstdShape->SetDim(0, ge::UNKNOWN_DIM_NUM);
+    if (IsUnknownRank(*x1Shape) || IsUnknownRank(*gammaShape)) {
+        SetUnknownRank(*rstdShape);
         OP_LOGD(context, "End to do InferShape4AddRmsNormBias with unknown rank.");
         return GRAPH_SUCCESS;
     }

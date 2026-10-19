@@ -1,33 +1,34 @@
 # LLaVA-OneVision-Qwen2-0.5B-OV
 
-## 1 Introduction
+## Introduction
 
 `llava-hf/llava-onevision-qwen2-0.5b-ov-hf` is a compact multimodal model built on top of Qwen2. It supports text-only generation together with image understanding, multi-image reasoning, and visual dialogue.
 
 This document shows the main verification steps for the model on vLLM Ascend, including environment preparation, single-NPU deployment, functional verification, and the existing accuracy baseline used by the repository.
 
-## 2 Supported Features
+## Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Environment Preparation
+## Environment Preparation
 
-### 3.1 Model Weight
+### Model Weight
 
 - `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`: [Download model weight](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf)
 
 The verified single-card deployment uses one Atlas A2 NPU. It is recommended to cache model weights under `/root/.cache` in advance to reduce startup time.
 
-## 4 Installation
+### Installation
 
 You can use the official docker image to run `LLaVA-OneVision-Qwen2-0.5B-OV` directly.
 
-Select an image based on your machine type and start the docker image on your node. Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+Select an image based on your machine type and start the docker image on your node. Refer to [using docker](../../installation.md#set-up-using-docker).
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+```{code-block} bash
+   :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -45,11 +46,11 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+## Deployment
 
-### 5.1 Single-node Deployment
+### Single-node Deployment
 
-#### 5.1.1 Single NPU
+#### Single NPU
 
 Run the following script to start the vLLM service on a single Atlas A2 NPU:
 
@@ -64,15 +65,15 @@ vllm serve "${MODEL_PATH}" \
     --gpu-memory-utilization 0.8
 ```
 
-#### 5.1.2 Multiple NPU
+#### Multiple NPU
 
 Single-NPU deployment is recommended for this 0.5B model.
 
-### 5.2 Prefill-Decode Disaggregation
+### Prefill-Decode Disaggregation
 
 Not supported yet.
 
-## 6 Functional Verification
+## Functional Verification
 
 If your service starts successfully, you can see logs similar to the following:
 
@@ -88,7 +89,7 @@ You can first verify that the model is exposed by the OpenAI-compatible API:
 curl http://127.0.0.1:8000/v1/models
 ```
 
-### 6.1 Text-only Request
+### Text-only Request
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -112,7 +113,7 @@ If the request succeeds, you can see a response similar to the following:
 {"choices":[{"message":{"content":"Hello! How can I assist you today?"}}]}
 ```
 
-### 6.2 Image Understanding Request
+### Image Understanding Request
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -147,7 +148,7 @@ If the request succeeds, you can see a response similar to the following:
 {"choices":[{"message":{"content":"The image features a logo consisting of a stylized geometric figure and the text \"TONGYI\" and \"Qwen\"..."}}]}
 ```
 
-## 7 Accuracy Evaluation
+## Accuracy Evaluation
 
 The repository already contains an end-to-end accuracy baseline for this model in `tests/e2e/models/configs/llava-onevision-qwen2-0.5b-ov-hf.yaml`.
 

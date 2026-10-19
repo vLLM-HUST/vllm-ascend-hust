@@ -27,3 +27,4 @@ add_ops_compile_options(
 if (NOT BUILD_OPS_RTY_KERNEL)
     add_modules_sources(OPTYPE sparse_flash_attention ACLNNTYPE aclnn_inner)
 endif()
+

@@ -18,13 +18,9 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-|  Weight Version    | Hardware Requirements                                            | Download Links |
-|--------------------|------------------------------------------------------------------|----------------|
-| BF16               | one Ascend Atlas 800I A2 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
+The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU. Download the model weights from [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
-
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -32,12 +28,18 @@ Download the weights to a directory that is accessible from the deployment envir
 
 Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the model-weight mount with the path used in your environment.
 
-=== "Atlas A2 inference products"
+For Atlas 300I DUO, use `vllm-ascend:nightly-releases-v0.23.0-310p` (or a later `-310p` image).
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+:::::{tab-set}
 
-    docker run --rm \
+::::{tab-item} Atlas A2 inference products
+:sync: A2
+
+```{code-block} bash
+  :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
         --net host \
@@ -52,14 +54,18 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
-    ```
+```
 
-=== "Atlas 300I DUO"
+::::
 
-    ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+::::{tab-item} Atlas 300I DUO
 
-    docker run --rm \
+```{code-block} bash
+  :substitutions:
+
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+
+docker run --rm \
         --name vllm-ascend \
         --shm-size=10g \
         --net host \
@@ -74,7 +80,10 @@ Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace the 
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
         -it -d $IMAGE bash
-    ```
+```
+
+::::
+:::::
 
 Verify that the container is running and that the installed package version matches the image tag:
 
@@ -87,15 +96,15 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
+f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
 
-!!! note
+:::{note}
 
-    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
 
-    ```bash
-    pip uninstall -y triton-ascend triton
-    ```
+```bash
+pip uninstall -y triton-ascend triton
+```
 
 To verify the source installation:
 
@@ -103,48 +112,56 @@ To verify the source installation:
 pip show vllm-ascend
 ```
 
-## 5 Online Service Deployment {: #5-online-service-deployment }
+:::
+
+## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
 
 Single-node deployment runs both audio prefill and decoding on one NPU, making it suitable for development, testing, and small-scale ASR services. Replace `your_model_path` with the local model directory, or use `Qwen/Qwen3-ASR-1.7B` to download the model through the configured model hub.
 
-=== "Atlas A2 inference products"
+:::::{tab-set}
+::::{tab-item} Atlas A2 inference products
 
-    ```shell
-    # Ensure the model path matches the directory recorded during download
-    vllm serve your_model_path \
-      --served-model-name qwen3-asr \
-      --tensor-parallel-size 1 \
-      --max-model-len 4096 \
-      --gpu-memory-utilization 0.9 \
-      --enforce-eager \
-      --port 8000
-    ```
+```shell
+vllm serve your_model_path \
+    --served-model-name qwen3-asr \
+    --tensor-parallel-size 1 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.9 \
+    --enforce-eager \
+    --port 8000
+```
 
-=== "Atlas 300I DUO"
+::::
+::::{tab-item} Atlas 300I DUO
 
-    ```shell
-    # Ensure the model path matches the directory recorded during download
-    vllm serve your_model_path \
-      --served-model-name qwen3-asr \
-      --tensor-parallel-size 1 \
-      --gpu-memory-utilization 0.9 \
-      --dtype float16 \
-      --max-model-len 4096 \
-      --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
-      --port 8000
-    ```
+```{code-block} bash
+   :substitutions:
 
-    !!! note
+vllm serve your_model_path \
+  --served-model-name qwen3-asr \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.9 \
+  --dtype float16 \
+  --max-model-len 4096 \
+  --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4]}' \
+  --port 8000
+```
 
-        - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
-        - `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
-        - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
-        - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
+::::
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](../../faqs.md).
+:::::
+
+Key parameters Descriptions:
+
+- `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.
+- `--max-model-len 4096` limits the maximum sequence length. On Atlas 300I DUO, always specify a conservative value explicitly; automatic detection can allocate an oversized attention mask and cause an out-of-memory error.
+- `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
+- `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
+
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 ## 6 Functional Verification
 
@@ -152,7 +169,9 @@ After the service is started, the model can be invoked by sending a prompt.
 
 **Chat Completions API:**
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -195,11 +214,11 @@ The following settings are starting points rather than globally optimal configur
 | High throughput | Increase request concurrency after establishing the latency baseline | Monitor NPU memory and end-to-end latency; do not use synthetic text-only requests as a proxy for ASR traffic. |
 | Long audio | Increase `--max-model-len` only as required | On Atlas 300I DUO, keep the value conservative because attention-mask memory grows with the configured maximum length. |
 
-For general parameter tuning, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+For general parameter tuning, refer to the [Performance Tuning Guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, see the [Public FAQs](../../faqs.md). This section covers model- and hardware-specific guidance.
+For common environment, installation, and general parameter issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
 
 ### Atlas 300I DUO runs out of memory during startup
 

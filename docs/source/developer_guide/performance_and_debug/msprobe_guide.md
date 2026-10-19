@@ -31,9 +31,8 @@ If you need to dump cudagraph graphs, you need to install from source code:
    ```bash
    git clone https://gitcode.com/Ascend/msprobe.git
    cd msprobe
-   pip install uv
-   python3 build.py -e include-mod=aclgraph_dump -e no-check=true
-   pip install artifacts/mindstudio_probe*.whl
+   python3 setup.py bdist_wheel --include-mod=aclgraph_dump --no-check
+   pip install dist/*.whl
    ```
 
 ## 2. Collecting Data with `msprobe`
@@ -290,7 +289,6 @@ Use `msprobe graph_visualize` to build or compare graphs, then open the generate
 - `RuntimeError: Please enforce eager mode`: Restart vLLM and add the `--enforce-eager` flag.
 - No dump files: Confirm that the JSON path is correct and every node has write permission. In distributed scenarios set `keep_all_ranks` so that every rank writes its own dump.
 - Dumps are too large: Start with a `statistics` task to locate abnormal tensors, then narrow the scope with `scope`/`list`/`tensor_list`, `filters`, `token_range`, etc.
-- `TypeError: PrecisionDebugger.start() got an unexpected keyword argument 'scheduled_tokens'`: Please Upgrade `msprobe` to v26.2.0 or later.
 
 ---
 

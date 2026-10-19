@@ -26,15 +26,12 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 | Test path contains | Runner |
 |---|---|
 | `four_card/_310p` | 310P 4-card |
-| `two_card/_310p` | 310P 2-card |
-| `one_card/_310p` | 310P single card |
+| `_310p` (under `one_card`/`two_card`) | 310P single card |
 | `four_card` | A3 4-card |
 | `two_card` | A3 2-card |
 | Others (e.g. `one_card`) | A2 single card |
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
-
-For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a relevant PR change trigger it automatically. See [Run doctest](../developer_guide/contribution/testing.md#run-doctest) for supported cases and local commands.
 
 Tests are run against both the community vLLM version and the latest release.
 
@@ -48,31 +45,8 @@ Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Tes
 |---|---|
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
-| `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
-| `/nightly <test_cases> --log-path <path>` | Upload a test file or directory as a downloadable artifact |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
-
-Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
-automatically captures test results, classifies failures (env vs. code), and triggers
-binary bisect for genuine failures. By default, AOP hooks are disabled.
-
-Use `--log-path <path>` to collect a file or directory from `node0` after
-the test, including when the test fails. Absolute paths refer to the test
-container; relative paths start at `/vllm-workspace/vllm-ascend`. For
-multi-node tests, pass a compact JSON map to select paths on each node:
-`--log-path '{"node0":"logs/leader.txt","node1":"/tmp/test-logs"}'`.
-To collect multiple paths from one node, repeat that node in a single
-mapping, for example
-`--log-path '{"node1":"logs/worker.txt","node1":"/tmp/test-logs"}'`.
-The equivalent list of single-path entries is also supported:
-`--log-path '[{"node1":"logs/worker.txt"},{"node1":"/tmp/test-logs"}]'`.
-Multiple paths from one node are placed under `path-1/`, `path-2/`, etc.
-inside that node's archive. The JSON must not contain spaces. Each selected
-node produces a `nodeN.tar.gz` file in the workflow run's **Artifacts** section.
-Single-node tests upload the selected paths as `download-artifact.tar.gz`. Missing
-paths are reported in the workflow log. System and credential directories
-cannot be selected.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
@@ -91,7 +65,7 @@ cannot be selected.
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.24.0
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch
@@ -104,29 +78,9 @@ cannot be selected.
 
 # Run accuracy group tests (branch defaults to main)
 /nightly accuracy-group
-
-# Enable AOP bisect for all tests
-/nightly all --aop_enabled
-
-# Run specific test with AOP on a release branch
-/nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
-
-# Download a directory from a single-node test
-/nightly test_custom_op --log-path /tmp/test-logs
-
-# Download a file relative to the test repository
-/nightly test_custom_op --log-path logs/output.txt
-
-# Download logs from the leader and a worker pod
-/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '{"node0":"/tmp/test-logs","node1":"/tmp/test-logs"}'
-
-# Download two files from the same worker pod
-/nightly multi-node-deepseek-v3.2-W8A8-EP --log-path '[{"node1":"logs/worker.txt"},{"node1":"logs/metrics.txt"}]'
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
-
-> **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
 
 ### `/cherry-pick`
 
@@ -142,7 +96,7 @@ Cherry-pick a PR's commits onto a specified target branch and create a new PR. T
 
 ```text
 # Cherry-pick to a release branch
-/cherry-pick releases/v0.24.0
+/cherry-pick releases/v0.23.0
 
 # Cherry-pick to main
 /cherry-pick main
@@ -174,39 +128,14 @@ Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g.,
 
 ### `/rerun`
 
-Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
-
-Only jobs that did not complete successfully are re-run (failed, cancelled, timed out, or startup-failed). Jobs that already succeeded are left untouched. Runs with `cancelled` / `timed_out` / `startup_failure` conclusions are re-run per remaining job, and runs whose failure also contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are handled the same way. Tests executed through reusable workflows (e.g. `Selected Tests`) are re-run via their caller job and are not duplicated.
+Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
 
 **Examples:**
 
 ```text
-# Re-run failed / cancelled CI jobs on this PR
+# Re-run all failed CI workflows on this PR
 /rerun
 ```
-
-### `/cancel`
-
-Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
-
-**Scope:**
-
-| Cancelled | Not cancelled |
-|---|---|
-| `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
-| `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |
-| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
-| `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
-| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
-
-**Examples:**
-
-```text
-# Force-cancel all CI runs on this PR
-/cancel
-```
-
-> Note: This uses the `force-cancel` API endpoint, which can cancel runs even when they are in a pending or queued state waiting for runners.
 
 ## Behavior
 
@@ -220,7 +149,6 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
-| `/cancel` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
 | `/nightly` | ✅ | ❌ |
@@ -231,7 +159,6 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
-| `/cancel` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |

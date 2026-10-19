@@ -29,8 +29,7 @@ from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
-
-from build_version import resolve_trusted_scm_version
+from setuptools_scm import get_version
 
 
 def load_module_from_path(module_name, path):
@@ -134,10 +133,6 @@ def get_chip_type() -> str:
 
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
-hardware = load_module_from_path(
-    "vllm_ascend_hardware",
-    os.path.join(ROOT_DIR, "vllm_ascend", "device", "hardware.py"),
-)
 
 if not envs.SOC_VERSION:
     soc_version = get_chip_type()
@@ -157,7 +152,39 @@ if not envs.SOC_VERSION:
 
 def gen_build_info():
     soc_version = envs.SOC_VERSION
-    device_type = hardware.device_type_from_soc_version(soc_version).name
+
+    soc_to_device = {
+        "910b": "A2",
+        "910c": "A3",
+        "310p": "_310P",
+        "ascend910b1": "A2",
+        "ascend910b2": "A2",
+        "ascend910b2c": "A2",
+        "ascend910b3": "A2",
+        "ascend910b4": "A2",
+        "ascend910b4-1": "A2",
+        "ascend910_9391": "A3",
+        "ascend910_9381": "A3",
+        "ascend910_9372": "A3",
+        "ascend910_9392": "A3",
+        "ascend910_9382": "A3",
+        "ascend910_9362": "A3",
+        "ascend310p1": "_310P",
+        "ascend310p3": "_310P",
+        "ascend310p5": "_310P",
+        "ascend310p7": "_310P",
+        "ascend310p3vir01": "_310P",
+        "ascend310p3vir02": "_310P",
+        "ascend310p3vir04": "_310P",
+        "ascend310p3vir08": "_310P",
+    }
+    if "ascend950" in soc_version:
+        device_type = "A5"
+    else:
+        assert soc_version in soc_to_device, (
+            f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
+        )
+        device_type = soc_to_device[soc_version]
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:
@@ -235,6 +262,7 @@ class cmake_build_ext(build_ext):
     def configure(self, ext: CMakeExtension) -> None:
         build_temp = self.build_temp
         os.makedirs(build_temp, exist_ok=True)
+        source_dir = os.path.abspath(ROOT_DIR)
         python_executable = sys.executable
         cmake_args = ["cmake"]
         # Default use release mode to compile the csrc code
@@ -286,39 +314,7 @@ class cmake_build_ext(build_ext):
         # add CMAKE_INSTALL_PATH
         cmake_args += [f"-DCMAKE_INSTALL_PREFIX={install_path}"]
 
-        # Torch installed from a wheel keeps TorchConfig.cmake inside the
-        # package tree rather than a system CMake prefix.  Preserve pybind11's
-        # prefix and add Torch's advertised prefix so out-of-tree and
-        # build-isolated wheel builds can resolve both packages.
-        try:
-            torch_query_env = os.environ.copy()
-            # Importing Torch only to locate its CMake package must not trigger
-            # optional device backends.  Some backends write initialization
-            # diagnostics to stdout, which would corrupt the path returned to
-            # CMake in no-device and build-isolated environments.
-            torch_query_env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
-            torch_cmake_path = (
-                subprocess.check_output(
-                    [
-                        python_executable,
-                        "-c",
-                        "import torch; print(torch.utils.cmake_prefix_path)",
-                    ],
-                    env=torch_query_env,
-                )
-                .decode()
-                .strip()
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Unable to discover Torch CMake prefix: {e}")
-
-        if not torch_cmake_path or "\n" in torch_cmake_path:
-            raise RuntimeError(f"Invalid Torch CMake prefix: {torch_cmake_path!r}")
-
-        cmake_prefix_paths = [pybind11_cmake_path, torch_cmake_path]
-        if existing_cmake_prefix := os.environ.get("CMAKE_PREFIX_PATH"):
-            cmake_prefix_paths.extend(existing_cmake_prefix.split(os.pathsep))
-        cmake_args += [f"-DCMAKE_PREFIX_PATH={';'.join(filter(None, cmake_prefix_paths))}"]
+        cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
 
         soc_version_map = {
             "910b": "ascend910b1",
@@ -351,12 +347,23 @@ class cmake_build_ext(build_ext):
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
 
-        cmake_args += [ext.cmake_lists_dir]
+        build_tool = []
+        # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
+        # if which('ninja') is not None:
+        #     build_tool += ['-G', 'Ninja']
+        # Default build tool to whatever cmake picks.
+
+        cmake_args += [source_dir]
         logging.info("cmake config command: %s", cmake_args)
         try:
             subprocess.check_call(cmake_args, cwd=self.build_temp)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"CMake configuration failed: {e}")
+
+        subprocess.check_call(
+            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            cwd=self.build_temp,
+        )
 
     def build_extensions(self) -> None:
         if not envs.COMPILE_CUSTOM_KERNELS:
@@ -440,32 +447,17 @@ class cmake_build_ext(build_ext):
 
 class custom_install(install):
     def run(self):
-        # ``bdist_wheel`` builds the project before invoking ``install`` with
-        # ``skip_build`` enabled.  Re-running build_ext here is both wasteful
-        # and unsafe for AscendC's in-place preprocessing: the first build
-        # turns intermediate object files into linked device objects, so a
-        # second build may try to link those outputs again.  Honor the
-        # standard setuptools contract and only build for direct installs.
-        if not self.skip_build:
-            self.run_command("build_ext")
+        self.run_command("build_ext")
         install.run(self)
 
 
 ROOT_DIR = os.path.dirname(__file__)
-SCM_GIT_DESCRIBE_COMMAND = [
-    "git",
-    "describe",
-    "--dirty",
-    "--tags",
-    "--long",
-    "--match",
-    "v[0-9]*",
-]
-VERSION = resolve_trusted_scm_version(
-    ROOT_DIR,
-    SCM_GIT_DESCRIBE_COMMAND,
-    write_to="vllm_ascend/_version.py",
-)
+try:
+    VERSION = get_version(write_to="vllm_ascend/_version.py")
+except LookupError:
+    # The checkout action in github action CI does not checkout the tag. It
+    # only checks out the commit. In this case, we set a dummy version.
+    VERSION = "0.0.0"
 
 ext_modules = []
 if envs.COMPILE_CUSTOM_KERNELS:
@@ -543,9 +535,6 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
-    package_data={
-        "vllm_ascend.observability": ["config/*.yaml"],
-    },
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
@@ -558,9 +547,6 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
-        ],
-        "ms_service_metric.providers": [
-            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
         ],
     },
 )

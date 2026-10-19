@@ -13,11 +13,11 @@ pandas
 psutil
 setuptools>=64
 setuptools-scm>=8
-torch==2.13.0
-torch-npu==2.13.0rc1
-torchvision==0.28.0
-torchaudio==2.11.0
-triton-ascend==3.6.0
+torch==2.10.0
+torch-npu==2.10.0.post4
+torchvision==0.25.0
+torchaudio==2.10.0
+triton-ascend==3.2.2
 wheel
 xgrammar>=0.1.30
 pandas-stubs
@@ -31,10 +31,9 @@ quart
 numba
 
 # Required for kvpool supports memcache backend
-memfabric_hybrid==1.2.0
-memcache_hybrid==1.2.0
+memfabric_hybrid
+memcache_hybrid
 
 arctic-inference==0.1.1
-transformers==5.19.0
-fastapi>=0.133.0,<0.137.0
-fastokens==0.2.0
+transformers==5.5.4
+fastapi<0.124.0

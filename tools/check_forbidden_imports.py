@@ -49,14 +49,6 @@ CHECK_IMPORTS = {
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
         tip="Replace 'import re' with 'import regex as re' or 'import regex'.",
         allowed_pattern=re.compile(r"^\s*import\s+regex(\s*|\s+as\s+re\s*)$"),
-        allowed_files={
-            # Cache key preparation and native build wrappers must work before
-            # third-party Python build dependencies are installed.
-            "csrc/scripts/build_cache.py",
-            # The doctest selector runs in a minimal CPU workflow before
-            # project dependencies are installed.
-            "tests/e2e/doctests/scripts/doctest_helper.py",
-        },
     ),
     "triton": ForbiddenImport(
         pattern=r"^(from|import)\s+triton(\s|\.|$)",

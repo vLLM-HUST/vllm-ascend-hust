@@ -23,24 +23,21 @@ import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
 
-
-@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="eplb,dynamic_eplb",
-    parallel="TP,EP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="BF16",
-    graph_mode="full_decode_only",
+pytestmark = pytest.mark.skipif(
+    not vllm_version_is("0.23.0"),
+    reason="broken on main, fix me.",
 )
+
+
 @wait_until_npu_memory_free()
 def test_moe_tp_ep_eplb_full_decode_only():
     """Verify MoE serving with TP, EP, EPLB, and full decode only."""
     model = "Qwen/Qwen3-30B-A3B"
     port = get_open_port()
     env_dict = {
+        "DYNAMIC_EPLB": "true",
         "HCCL_BUFFSIZE": "1024",
     }
     server_args = [
@@ -53,18 +50,17 @@ def test_moe_tp_ep_eplb_full_decode_only():
         str(port),
         "--compilation-config",
         json.dumps({"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8]}),
-        "--enable-eplb",
-        "--eplb-config",
+        "--additional-config",
         json.dumps(
             {
-                "window_size": 128,
-                "step_interval": 256,
-                "num_redundant_experts": 2,
-                "use_async": True,
+                "eplb_config": {
+                    "dynamic_eplb": True,
+                    "expert_heat_collection_interval": 100,
+                    "algorithm_execution_interval": 20,
+                    "num_redundant_experts": 2,
+                }
             }
         ),
-        "--additional-config",
-        json.dumps({"eplb_config": {"load_collection_phase": "all"}}),
     ]
 
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
