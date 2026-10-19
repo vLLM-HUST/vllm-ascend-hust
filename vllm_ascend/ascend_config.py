@@ -1438,6 +1438,9 @@ def init_ascend_config(vllm_config):
         "profiling_chunk_config",
         "batch_job_sched_config",
     }
+    if vllm_config.parallel_config.worker_cls == "betterscale.qwen35_worker.Worker":
+        from betterscale.models.qwen35.cache_config import ascend_extension_keys
+        _NON_USER_INPUT_KEYS.update(ascend_extension_keys(vllm_config))
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
     # vLLM-Omni shares this mapping with the platform plugin. Preserve its

@@ -1196,6 +1196,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         When ``sampling_metadata`` is None (e.g. during ``dummy_run`` /
         profile run), greedy argmax is used and ``draft_probs`` is None.
         """
+        if getattr(self, "_betterscale_draft_greedy", False):
+            return greedy_sample(logits), None
         if sampling_metadata is None:
             if self._enable_probabilistic_draft_probs:
                 logger.warning(
@@ -1329,7 +1331,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     ori_token_indices_to_sample,
                     is_logits=False,
                 )
-        elif get_ascend_config().enable_reduce_sample:
+        elif get_ascend_config().enable_reduce_sample or getattr(self, "_betterscale_draft_greedy", False):
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(
                     sample_hidden_states, sampling_metadata
@@ -1570,7 +1572,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             draft_probs_step: torch.Tensor | None = None
-            if get_ascend_config().enable_reduce_sample:
+            if get_ascend_config().enable_reduce_sample or getattr(self, "_betterscale_draft_greedy", False):
                 if self.method in ("eagle3", "dflash", "dspark", "mtp"):
                     draft_token_ids, draft_probs_step = self.compute_draft_token_ids(
                         sample_hidden_states, sampling_metadata

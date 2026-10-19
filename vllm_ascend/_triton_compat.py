@@ -13,10 +13,16 @@ _REAL_GLUON_MIN_VERSION = Version("3.6")
 
 
 def _triton_version() -> Version | None:
-    try:
-        return Version(importlib.metadata.version("triton"))
-    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
-        return None
+    # Ascend's official wheel is named triton-ascend and provides the triton
+    # import namespace. Check both distribution names before choosing legacy.
+    for distribution in ("triton", "triton-ascend"):
+        try:
+            return Version(importlib.metadata.version(distribution))
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        except InvalidVersion:
+            return None
+    return None
 
 
 def _install_legacy_gluon_stubs() -> None:

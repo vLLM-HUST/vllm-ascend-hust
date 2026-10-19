@@ -1369,14 +1369,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            self.num_accepted_tokens.np.fill(1)
-            self.num_accepted_tokens.gpu.fill_(1)
+        # Owned device APC remaps accepted progress; preserve no CPU round trip.
+        self.num_accepted_tokens.gpu.fill_(1)
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
@@ -1395,7 +1389,10 @@ class NPUModelRunner(GPUModelRunner):
             if prev_positions_gpu is None:
                 self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
-            update_num_computed_tokens_for_batch_change(
+            update_progress = update_num_computed_tokens_for_batch_change
+            if getattr(self, "_bs_fused_progress", False):
+                from betterscale.models.qwen35.token_progress import update as update_progress
+            update_progress(
                 self.num_computed_tokens,
                 self.num_accepted_tokens.gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
@@ -1458,29 +1455,33 @@ class NPUModelRunner(GPUModelRunner):
                 positions_ready_on_device=False,
             )
 
-        if cp_async_rebuild.positions_ready_on_device:
-            pass
-        elif cp_async_rebuild.rebuilt:
-            # The async rebuild computed corrected positions on CPU.
-            # Copy positions_np to GPU so input_ids and positions stay aligned.
-
-            self.positions[:total_num_scheduled_tokens].copy_(
-                torch.from_numpy(
-                    positions_np[:total_num_scheduled_tokens]
-                ).to(self.device),
-                non_blocking=True,
-            )
-        else:
-            self.positions[:total_num_scheduled_tokens] = (
-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + self.query_pos.gpu[:total_num_scheduled_tokens]
-            )
-
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+        from betterscale.models.qwen35.position_reuse import prepare as prepare_positions
+        fused_positions = self.use_async_spec_decode and prepare_positions(
+            self, num_reqs, total_num_scheduled_tokens, computed_token_tensor_cpu
         )
-        self.seq_lens[num_reqs:].fill_(0)
+        if not fused_positions:
+            if cp_async_rebuild.positions_ready_on_device:
+                pass
+            elif cp_async_rebuild.rebuilt:
+                # The async rebuild computed corrected positions on CPU.
+                # Copy positions_np to GPU so input_ids and positions stay aligned.
 
+                self.positions[:total_num_scheduled_tokens].copy_(
+                    torch.from_numpy(
+                        positions_np[:total_num_scheduled_tokens]
+                    ).to(self.device),
+                    non_blocking=True,
+                )
+            else:
+                self.positions[:total_num_scheduled_tokens] = (
+                    self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                    + self.query_pos.gpu[:total_num_scheduled_tokens]
+                )
+
+            self.seq_lens[:num_reqs] = (
+                self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            )
+            self.seq_lens[num_reqs:].fill_(0)
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
         # on CPU using the valid-sampled-token counts that are already copied
@@ -1501,7 +1502,7 @@ class NPUModelRunner(GPUModelRunner):
             self.positions[:total_num_scheduled_tokens],
         )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if not fused_positions and self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
@@ -2168,6 +2169,8 @@ class NPUModelRunner(GPUModelRunner):
                         ):
                             req_state.prev_num_draft_len = 0
 
+                from betterscale.models.qwen35.device_apc import wait_for_previous
+                wait_for_previous(self, scheduler_output)
                 # Update persistent batch states.
                 deferred_state_corrections_fn = self._update_states(
                     scheduler_output
@@ -2279,44 +2282,8 @@ class NPUModelRunner(GPUModelRunner):
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 # postprocess_mamba runs later in _update_states_after_model_execute.
-                if self.cache_config.mamba_cache_mode == "align":
-                    # preprocess_mamba reads req_state.num_computed_tokens (CPU)
-                    # to decide copy operations, so we must apply deferred
-                    # corrections before it runs.
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
-                        deferred_state_corrections_fn = None
-                    mamba_bufs = self._get_mamba_bufs()
-                    preprocess_bufs = mamba_bufs.preprocess
-                    mamba_utils.preprocess_mamba(
-                        scheduler_output,
-                        self.kv_cache_config,
-                        self.cache_config,
-                        self.mamba_state_idx,
-                        self.input_batch,
-                        self.requests,
-                        self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
-                        preprocess_bufs,
-                    )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-                    if mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
-                            mamba_bufs.postprocess_align,
-                            scheduler_output,
-                            self.input_batch.req_ids,
-                            num_reqs,
-                            self.requests,
-                            self.mamba_state_idx,
-                        )
+                from betterscale.models.qwen35.device_apc import prepare as prepare_device_apc
+                prepare_device_apc(self, scheduler_output)
                 if self.use_compress:
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
@@ -2436,18 +2403,9 @@ class NPUModelRunner(GPUModelRunner):
             # with the remaining layers' loads. Non-layerwise connectors keep
             # the batched copy after all loads finish (do_mamba_copy_block).
             mamba_copy_connector = None
-            if self.cache_config.mamba_cache_mode == "align":
-                if has_kv_transfer_group():
-                    connector = get_kv_transfer_group()
-                    prepare_mamba_state_copy = getattr(
-                        connector,
-                        "prepare_mamba_state_copy",
-                        None,
-                    )
-                    if callable(prepare_mamba_state_copy) and prepare_mamba_state_copy(preprocess_bufs):
-                        mamba_copy_connector = connector
-                if mamba_copy_connector is None:
-                    mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            # The admitted BetterScale configuration excludes KV connectors.
+            # Owned APC migration already precedes metadata publication.
+            assert not has_kv_transfer_group()
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )

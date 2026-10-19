@@ -409,12 +409,12 @@ class AscendLogitsProcessor(LogitsProcessor):
         if skip_gather:
             return logits
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
+        if not (get_ascend_config().enable_reduce_sample or getattr(self, "_betterscale_draft_greedy", False)):
             logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
+            if not (get_ascend_config().enable_reduce_sample or getattr(self, "_betterscale_draft_greedy", False)):
                 logits = logits[..., : self.org_vocab_size]
             else:
                 logits = logits[..., : lm_head.num_org_embeddings_per_partition]
