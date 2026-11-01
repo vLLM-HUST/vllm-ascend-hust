@@ -217,3 +217,22 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
+
+
+def _moe_gate_mul_impl(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    from vllm_ascend.ops.triton.moe_epilogue import gate_mul
+
+    return gate_mul(gate, out)
+
+
+def _moe_gate_mul_impl_fake(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(out)
+
+
+direct_register_custom_op(
+    op_name="moe_gate_mul",
+    op_func=_moe_gate_mul_impl,
+    fake_impl=_moe_gate_mul_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
