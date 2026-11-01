@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
@@ -38,6 +39,10 @@ from vllm_ascend.utils import (
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
+
+# Read once at import time: the flag stays constant for the whole process, so
+# dynamo folds it at trace time instead of depending on a traced shape.
+_MOE_EPILOGUE_ON = os.environ.get("VLLM_HUST_MOE_EPILOGUE", "0") == "1"
 
 
 @dataclass
@@ -164,7 +169,11 @@ class AscendSharedExperts:
         # Qwen3-Next specific gating mechanism
         if hasattr(self.layer, "expert_gate") and self.layer.expert_gate is not None:
             gate_out, _ = self.layer.expert_gate(hidden_states)  # type: ignore
-            shared_out = F.sigmoid(gate_out) * shared_out
+            gate = F.sigmoid(gate_out)
+            if _MOE_EPILOGUE_ON:
+                shared_out = torch.ops.vllm.moe_gate_mul(gate, shared_out)
+            else:
+                shared_out = gate * shared_out
         return shared_out
 
     def parallel_mode(self) -> SharedExpertParallelMode:
