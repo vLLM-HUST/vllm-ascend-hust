@@ -76,6 +76,31 @@ def _pack_conv_weights(conv1d) -> bool:
     return True
 
 
+def _rearrange_mixed_qkv(layer, mixed_qkv):
+    """Fused rearrange: one gather-write instead of 3x contiguous + cat.
+
+    A module-level helper rather than a method: ``_forward_core`` is patched onto
+    the vllm-core ``QwenGatedDeltaNetAttention``, whose instances do not carry
+    methods added to the Ascend subclass. ``rearrange_mixed_qkv`` itself lives on
+    the model subclass, so the stock path calls it by name, not via ``super()``.
+    """
+    if mixed_qkv is None:
+        return None, None, None
+    if not _GDN_UNPACK_FUSED:
+        return layer.rearrange_mixed_qkv(mixed_qkv)
+
+    rows = mixed_qkv.shape[0]
+    q_dim = layer.key_dim // layer.tp_size
+    k_dim = q_dim
+    v_dim = layer.value_dim // layer.tp_size
+    q, k, v = gdn_rearrange(mixed_qkv, q_dim, k_dim, v_dim)
+    return (
+        q.view(1, rows, q_dim // layer.head_k_dim, layer.head_k_dim),
+        k.view(1, rows, k_dim // layer.head_k_dim, layer.head_k_dim),
+        v.view(1, rows, v_dim // layer.head_v_dim, layer.head_v_dim),
+    )
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -215,29 +240,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
             return self.split_ba(ba)
         return ba.chunk(2, dim=-1)
 
-    def _rearrange_mixed_qkv(self, mixed_qkv):
-        """Fused rearrange: one gather-write instead of 3x contiguous + cat.
-
-        ``rearrange_mixed_qkv`` is defined on the model subclass rather than on
-        ``GatedDeltaNetAttention``, so the stock path calls it by name instead of
-        through ``super()``. Falls back there whenever the layout is unexpected.
-        """
-        if mixed_qkv is None:
-            return None, None, None
-        if not _GDN_UNPACK_FUSED:
-            return self.rearrange_mixed_qkv(mixed_qkv)
-
-        rows = mixed_qkv.shape[0]
-        q_dim = self.key_dim // self.tp_size
-        k_dim = q_dim
-        v_dim = self.value_dim // self.tp_size
-        q, k, v = gdn_rearrange(mixed_qkv, q_dim, k_dim, v_dim)
-        return (
-            q.view(1, rows, q_dim // self.head_k_dim, self.head_k_dim),
-            k.view(1, rows, k_dim // self.head_k_dim, self.head_k_dim),
-            v.view(1, rows, v_dim // self.head_v_dim, self.head_v_dim),
-        )
-
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -305,7 +307,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
                     z_size = self.value_dim // self.tp_size
                     ba, _ = self.in_proj_ba(hidden_states)
                     half = self.value_dim // self.tp_size // self.head_v_dim
-                    if _GDN_UNPACK_FUSED and not hasattr(self, "split_ba"):
+                    ba_split_by_tp = getattr(self, "disable_tp_for_ba_proj", False) and self.tp_size > 1
+                    if _GDN_UNPACK_FUSED and not ba_split_by_tp:
                         mixed_qkv, b, a = gdn_unpack(mixed_qkvz, ba, qkv_size, half)
                         z = mixed_qkvz[:, qkv_size:].reshape(num_tokens, -1, self.head_v_dim)
                     else:
@@ -532,8 +535,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+        query_spec, key_spec, value_spec = _rearrange_mixed_qkv(self, mixed_qkv_spec)
+        query_non_spec, key_non_spec, value_non_spec = _rearrange_mixed_qkv(self, mixed_qkv_non_spec)
 
         # 2. Recurrent attention
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
@@ -588,7 +591,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
             assert mixed_qkv_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
-            query_decode, key_decode, value_decode = self._rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
+            query_decode, key_decode, value_decode = _rearrange_mixed_qkv(self, mixed_qkv_non_spec[:num_decode_tokens])
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode)
             key_decode = l2norm_fwd(key_decode)
