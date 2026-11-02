@@ -109,7 +109,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
         "lightning_indexer_quant"
-        "compressor"
+        # Local Qwen3.5 build: Compressor is not used by this model.
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"
