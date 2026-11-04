@@ -22,6 +22,7 @@ import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -37,11 +38,11 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
+from vllm_ascend.ops.gdn_epilogue import gdn_rearrange, gdn_unpack
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
-from vllm.model_executor.layers.hpc import HpcModule
 
 # W3-F2 (2026-10-15): merge in_proj_ba into in_proj_qkvz -> one MatMulV2 per
 # GDN layer instead of two (flat qkvz layout only). Env-gated, default OFF.
@@ -49,6 +50,10 @@ from vllm.model_executor.layers.hpc import HpcModule
 # 一次性完成并替换 weight —— v1 的 forward 内 lazy 实例缓存在 dynamo 下失效
 # (每步重 cat, 1015-175721 窗实测 ConcatD +2636ms 净回归)。
 _MERGE_GDN_INPROJ = os.environ.get("VLLM_HUST_GDN_MERGE_INPROJ", "0") == "1"
+
+# Read once at import: process-constant, so dynamo folds it at trace time
+# instead of depending on a traced shape.
+_GDN_UNPACK_FUSED = os.environ.get("VLLM_HUST_GDN_UNPACK_FUSED", "0") == "1"
 
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight_packed"
@@ -60,11 +65,7 @@ def _pack_conv_weights(conv1d) -> bool:
     source = conv1d.weight
     if source.is_meta:
         return False
-    packed = (
-        source.view(source.size(0), source.size(2))
-        .transpose(0, 1)
-        .contiguous()
-    )
+    packed = source.view(source.size(0), source.size(2)).transpose(0, 1).contiguous()
     if _PACKED_CONV_WEIGHT_NAME in conv1d._parameters:
         conv1d._parameters[_PACKED_CONV_WEIGHT_NAME].data = packed
     else:
@@ -73,6 +74,31 @@ def _pack_conv_weights(conv1d) -> bool:
             torch.nn.Parameter(packed, requires_grad=False),
         )
     return True
+
+
+def _rearrange_mixed_qkv(layer, mixed_qkv):
+    """Fused rearrange: one gather-write instead of 3x contiguous + cat.
+
+    A module-level helper rather than a method: ``_forward_core`` is patched onto
+    the vllm-core ``QwenGatedDeltaNetAttention``, whose instances do not carry
+    methods added to the Ascend subclass. ``rearrange_mixed_qkv`` itself lives on
+    the model subclass, so the stock path calls it by name, not via ``super()``.
+    """
+    if mixed_qkv is None:
+        return None, None, None
+    if not _GDN_UNPACK_FUSED:
+        return layer.rearrange_mixed_qkv(mixed_qkv)
+
+    rows = mixed_qkv.shape[0]
+    q_dim = layer.key_dim // layer.tp_size
+    k_dim = q_dim
+    v_dim = layer.value_dim // layer.tp_size
+    q, k, v = gdn_rearrange(mixed_qkv, q_dim, k_dim, v_dim)
+    return (
+        q.view(1, rows, q_dim // layer.head_k_dim, layer.head_k_dim),
+        k.view(1, rows, k_dim // layer.head_k_dim, layer.head_k_dim),
+        v.view(1, rows, v_dim // layer.head_v_dim, layer.head_v_dim),
+    )
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
@@ -91,15 +117,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
                 print("[D4site2] packed conv weight [W,D] ready", flush=True)
             except Exception as _e:  # noqa: BLE001
                 print(f"[D4site2] pack skipped: {_e!r}", flush=True)
-        print(f"[W3F2v2] hook: env={_MERGE_GDN_INPROJ} gqa={getattr(self, 'gqa_interleaved_layout', None)} "
-              f"has_qkv={hasattr(self, 'in_proj_qkv')} merged={getattr(self, '_w3f2_merged', False)}", flush=True)
+        print(
+            f"[W3F2v2] hook: env={_MERGE_GDN_INPROJ} gqa={getattr(self, 'gqa_interleaved_layout', None)} "
+            f"has_qkv={hasattr(self, 'in_proj_qkv')} merged={getattr(self, '_w3f2_merged', False)}",
+            flush=True,
+        )
         if (not _MERGE_GDN_INPROJ) or getattr(self, "_w3f2_merged", False):
             return
         if hasattr(self, "in_proj_qkv") or self.gqa_interleaved_layout:
             return
-        merged = torch.cat(
-            [self.in_proj_qkvz.weight.data, self.in_proj_ba.weight.data], dim=0
-        )
+        merged = torch.cat([self.in_proj_qkvz.weight.data, self.in_proj_ba.weight.data], dim=0)
         self.in_proj_qkvz.weight = torch.nn.Parameter(merged, requires_grad=False)
         self._w3f2_merged = True
 
@@ -261,9 +288,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
                     # W3-F2 v2: in_proj_qkvz.weight 已含 ba 段（[6176,2048]），
                     # 单次 matmul 后 slice；零 cat、零缓存写（dynamo 安全）。
                     y = torch.nn.functional.linear(hidden_states, self.in_proj_qkvz.weight)
-                    qkvz_size = (self.key_dim * 2 + self.value_dim) // self.tp_size + (
-                        self.value_dim // self.tp_size
-                    )
+                    qkvz_size = (self.key_dim * 2 + self.value_dim) // self.tp_size + (self.value_dim // self.tp_size)
                     mixed_qkvz = y[:, :qkvz_size].contiguous()
                     ba = y[:, qkvz_size:].contiguous()
                     num_tokens = mixed_qkvz.size(0)
@@ -280,13 +305,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
                     num_tokens = mixed_qkvz.size(0)
                     qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                     z_size = self.value_dim // self.tp_size
-                    mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                    z = z.reshape(z.size(0), -1, self.head_v_dim)
                     ba, _ = self.in_proj_ba(hidden_states)
-                    b, a = self._split_ba_for_tp(ba)
+                    half = self.value_dim // self.tp_size // self.head_v_dim
+                    ba_split_by_tp = getattr(self, "disable_tp_for_ba_proj", False) and self.tp_size > 1
+                    if _GDN_UNPACK_FUSED and not ba_split_by_tp:
+                        mixed_qkv, b, a = gdn_unpack(mixed_qkvz, ba, qkv_size, half)
+                        z = mixed_qkvz[:, qkv_size:].reshape(num_tokens, -1, self.head_v_dim)
+                    else:
+                        mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                        z = z.reshape(z.size(0), -1, self.head_v_dim)
+                        b, a = self._split_ba_for_tp(ba)
 
-                    b = b.contiguous()
-                    a = a.contiguous()
+                        b = b.contiguous()
+                        a = a.contiguous()
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -380,11 +411,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         _packed_conv_w = getattr(self.conv1d, _PACKED_CONV_WEIGHT_NAME, None)
-        conv_weights_T = (
-            _packed_conv_w
-            if _packed_conv_w is not None
-            else conv_weights.transpose(0, 1)
-        )
+        conv_weights_T = _packed_conv_w if _packed_conv_w is not None else conv_weights.transpose(0, 1)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -508,8 +535,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+        query_spec, key_spec, value_spec = _rearrange_mixed_qkv(self, mixed_qkv_spec)
+        query_non_spec, key_non_spec, value_non_spec = _rearrange_mixed_qkv(self, mixed_qkv_non_spec)
 
         # 2. Recurrent attention
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
@@ -564,7 +591,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
             assert mixed_qkv_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
-            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
+            query_decode, key_decode, value_decode = _rearrange_mixed_qkv(self, mixed_qkv_non_spec[:num_decode_tokens])
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode)
             key_decode = l2norm_fwd(key_decode)
