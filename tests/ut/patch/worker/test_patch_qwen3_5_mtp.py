@@ -26,6 +26,11 @@ def test_qwen3_5_multimodal_attention_uses_mrope():
     assert patch_qwen3_5._uses_multimodal_rope(attention)
 
 
+def test_split_qkv_rope_fused_flag_default_off():
+    assert not patch_qwen3_5._SPLIT_QKV_ROPE_FUSED_ON
+    assert patch_qwen3_5.ENV_SPLIT_QKV_ROPE_FUSED == "VLLM_HUST_SPLIT_QKV_ROPE_FUSED"
+
+
 @pytest.mark.skipif(
     patch_qwen3_5.Qwen3_5MultiTokenPredictor is None,
     reason="Qwen3.5 MTP model is not available in this vLLM version.",

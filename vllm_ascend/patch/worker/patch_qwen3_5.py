@@ -17,6 +17,8 @@
 # mypy: ignore-errors
 
 
+import os
+
 import torch
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
@@ -35,6 +37,10 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 _GDN_PATCH_TARGET = _GDNBaseCls
+_GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+
+ENV_SPLIT_QKV_ROPE_FUSED = "VLLM_HUST_SPLIT_QKV_ROPE_FUSED"
+_SPLIT_QKV_ROPE_FUSED_ON = os.environ.get(ENV_SPLIT_QKV_ROPE_FUSED, "0") == "1"
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -46,6 +52,9 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
+            # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
+            if positions.ndim == 1:
+                positions = positions.unsqueeze(0).expand(3, -1)
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
@@ -64,6 +73,32 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
                 mrope_section=self.rotary_emb.mrope_section,
                 is_interleaved=self.rotary_emb.mrope_interleaved,
                 rope_dim=self.rotary_emb.rotary_dim,
+                has_gate=self.attn_output_gate,
+            )
+        elif _SPLIT_QKV_ROPE_FUSED_ON and positions.ndim == 1 and hasattr(self.rotary_emb, "cos_sin_cache"):
+            cos_sin_1d = self.rotary_emb.cos_sin_cache[positions]
+            if cos_sin_1d.device != qkv.device:
+                cos_sin_1d = cos_sin_1d.to(qkv.device)
+            if cos_sin_1d.dtype != qkv.dtype:
+                cos_sin_1d = cos_sin_1d.to(qkv.dtype)
+            cos_sin = cos_sin_1d.unsqueeze(0).repeat(3, 1, 1).contiguous()
+
+            rotary_dim = self.rotary_emb.rotary_dim
+            mrope_section = [rotary_dim // 2, 0, 0]
+            is_interleaved = getattr(self.rotary_emb, "is_neox_style", True) is False
+
+            q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                qkv=qkv,
+                q_weight=1.0 + self.q_norm.weight,
+                k_weight=1.0 + self.k_norm.weight,
+                cos_sin=cos_sin,
+                num_q_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_dim,
+                eps=self.config.rms_norm_eps,
+                mrope_section=mrope_section,
+                is_interleaved=is_interleaved,
+                rope_dim=rotary_dim,
                 has_gate=self.attn_output_gate,
             )
         else:
