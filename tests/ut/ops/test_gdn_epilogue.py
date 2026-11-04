@@ -178,6 +178,16 @@ class TestStockFallback(TestBase):
         for got, ref in ((out_q, ref_q), (out_k, ref_k), (out_v, ref_v)):
             torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
+    def test_output_norm_fusable_noncontiguous_z(self):
+        # Qwen3.5 non-interleaved path: z is a column slice of mixed_qkvz
+        # reshaped to [T, H, D]; row stride > D but last dim unit-stride.
+        base = torch.randn(2, 4096, dtype=torch.bfloat16)
+        z = base[:, 2048:].reshape(2, 16, 128)
+        c = torch.zeros(2, 16, 128, dtype=torch.bfloat16)
+        self.assertFalse(z.is_contiguous())
+        with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_OUTPUT_NORM_FUSED: "1"}, clear=True):
+            self.assertTrue(gdn_epilogue.output_norm_fusable(c, z))
+
     def test_output_norm_stock_fallback(self):
         c = torch.randn(2, 4, 128, dtype=torch.bfloat16)
         z = torch.randn(2, 4, 128, dtype=torch.bfloat16)
