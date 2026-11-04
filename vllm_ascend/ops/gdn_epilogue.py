@@ -338,52 +338,43 @@ def _gdn_rearrange_fake(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["stride_xm", "stride_zm", "stride_outm", "M", "N", "eps"])
 def _output_norm_kernel(
     x_ptr,
     z_ptr,
     w_ptr,
     out_ptr,
     stride_xm,
-    stride_xn,
     stride_zm,
-    stride_zn,
     stride_outm,
-    stride_outn,
-    M: tl.constexpr,
-    N: tl.constexpr,
+    M,
+    N,
+    eps,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    eps: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_offs = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-    col_offs = tl.arange(0, BLOCK_N)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, BLOCK_N)
 
-    row_mask = row_offs < M
-    x_ptrs = x_ptr + row_offs[:, None] * stride_xm + col_offs[None, :] * stride_xn
-    z_ptrs = z_ptr + row_offs[:, None] * stride_zm + col_offs[None, :] * stride_zn
-    out_ptrs = out_ptr + row_offs[:, None] * stride_outm + col_offs[None, :] * stride_outn
-    w_ptrs = w_ptr + col_offs[None, :]
+    row_mask = rows < M
+    col_mask = cols < N
+    mask_2d = row_mask[:, None] & col_mask[None, :]
 
-    mask_2d = row_mask[:, None]
+    w = tl.load(w_ptr + cols, mask=col_mask).to(tl.float32)
+    x_ptrs = x_ptr + rows[:, None] * stride_xm + cols[None, :]
+    z_ptrs = z_ptr + rows[:, None] * stride_zm + cols[None, :]
+    x = tl.load(x_ptrs, mask=mask_2d).to(tl.float32)
+    z = tl.load(z_ptrs, mask=mask_2d).to(tl.float32)
 
-    x = tl.load(x_ptrs, mask=mask_2d, other=0.0)
-    z = tl.load(z_ptrs, mask=mask_2d, other=0.0)
-    w = tl.load(w_ptrs)
+    xbar = tl.where(col_mask[None, :], x, 0.0)
+    var = tl.sum(xbar * xbar, axis=1) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    y = (x * rstd[:, None]) * w[None, :]
+    y *= z * tl.sigmoid(z)
 
-    x_f32 = x.to(tl.float32)
-    z_f32 = z.to(tl.float32)
-    w_f32 = w.to(tl.float32)
-
-    var = tl.sum(x_f32 * x_f32, axis=1, keep_dims=True) * (1.0 / N)
-    rsqrt = tl.math.rsqrt(var + eps)
-    x_normed = (x_f32 * rsqrt) * w_f32
-
-    silu_z = z_f32 * tl.sigmoid(z_f32)
-    out = x_normed * silu_z
-
-    tl.store(out_ptrs, out.to(x.dtype), mask=mask_2d)
+    out_ptrs = out_ptr + rows[:, None] * stride_outm + cols[None, :]
+    tl.store(out_ptrs, y, mask=mask_2d)
 
 
 def output_norm_fusable(
@@ -395,11 +386,16 @@ def output_norm_fusable(
         return False
     if core_attn_out.dtype is not torch.bfloat16 or z.dtype is not torch.bfloat16:
         return False
-    if not core_attn_out.is_contiguous() or not z.is_contiguous():
-        return False
     if core_attn_out.dim() != 3 or z.dim() != 3:
         return False
     if core_attn_out.shape != z.shape:
+        return False
+    # Layout contract: both tensors must reduce to a strided 2D view of
+    # [T*H, D]; x comes from torch.zeros (contiguous), z may be a column
+    # slice of mixed_qkvz (row stride > D, last dim still unit-stride).
+    x2d = core_attn_out.view(core_attn_out.shape[0] * core_attn_out.shape[1], core_attn_out.shape[2])
+    z2d = z.view(z.shape[0] * z.shape[1], z.shape[2]) if z.is_contiguous() else z.reshape(-1, z.shape[2])
+    if x2d.stride(1) != 1 or z2d.stride(1) != 1:
         return False
     if norm_module is not None:
         if not hasattr(norm_module, "weight") or norm_module.weight is None:
@@ -444,7 +440,6 @@ def gdn_output_norm_rearrange(
     n = d
     c_2d = core_attn_out.reshape(-1, d)
     z_2d = z.reshape(-1, d)
-
     out = torch.empty((t, h * d), dtype=core_attn_out.dtype, device=core_attn_out.device)
     out_view = out.view(m, n)
 
@@ -458,16 +453,13 @@ def gdn_output_norm_rearrange(
         weight,
         out_view,
         c_2d.stride(0),
-        c_2d.stride(1),
         z_2d.stride(0),
-        z_2d.stride(1),
         out_view.stride(0),
-        out_view.stride(1),
-        M=m,
-        N=n,
+        m,
+        n,
+        eps,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        eps=eps,
     )
     return out
 
