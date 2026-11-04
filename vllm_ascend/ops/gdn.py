@@ -38,7 +38,13 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
-from vllm_ascend.ops.gdn_epilogue import gdn_rearrange, gdn_unpack
+from vllm_ascend.ops.gdn_epilogue import (
+    gdn_output_norm_rearrange,
+    gdn_rearrange,
+    gdn_unpack,
+    is_output_norm_enabled,
+    output_norm_fusable,
+)
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -355,13 +361,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        if is_output_norm_enabled() and output_norm_fusable(core_attn_out, z, self.norm):
+            core_attn_out = gdn_output_norm_rearrange(
+                core_attn_out,
+                z,
+                self.norm.weight,
+                getattr(self.norm, "eps", 1e-6),
+            )
+        else:
+            z_shape_og = z.shape
+            # Reshape input data into 2D tensor
+            core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            z = z.reshape(-1, z.shape[-1])
+            core_attn_out = self.norm(core_attn_out, z)
+            core_attn_out = core_attn_out.reshape(z_shape_og)
+            core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if output is not None:
             output[:num_tokens] = out

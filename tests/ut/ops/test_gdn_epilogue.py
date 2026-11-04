@@ -26,13 +26,18 @@ class TestGate(TestBase):
     def test_disabled_by_default(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(gdn_epilogue.is_enabled())
+            self.assertFalse(gdn_epilogue.is_output_norm_enabled())
 
     def test_enabled_only_on_exact_token(self):
         for value in ("0", "true", "", "2"):
             with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_UNPACK_FUSED: value}, clear=True):
                 self.assertFalse(gdn_epilogue.is_enabled(), value)
+            with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_OUTPUT_NORM_FUSED: value}, clear=True):
+                self.assertFalse(gdn_epilogue.is_output_norm_enabled(), value)
         with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_UNPACK_FUSED: "1"}, clear=True):
             self.assertTrue(gdn_epilogue.is_enabled())
+        with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_OUTPUT_NORM_FUSED: "1"}, clear=True):
+            self.assertTrue(gdn_epilogue.is_output_norm_enabled())
 
     def test_max_rows_default_and_override(self):
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -97,6 +102,33 @@ class TestFusable(TestBase):
             qkvz, ba = self._pair(rows=5)
             self.assertFalse(gdn_epilogue.unpack_fusable(qkvz, ba))
 
+    def test_output_norm_fusable_checks(self):
+        c = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        z = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        w = torch.randn(128, dtype=torch.bfloat16)
+        norm_mod = torch.nn.Module()
+        norm_mod.weight = torch.nn.Parameter(w)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(gdn_epilogue.output_norm_fusable(c, z, norm_mod))
+
+        with mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_OUTPUT_NORM_FUSED: "1"}, clear=True):
+            self.assertTrue(gdn_epilogue.output_norm_fusable(c, z, norm_mod))
+
+            # Dimension mismatch (must be 3D)
+            self.assertFalse(gdn_epilogue.output_norm_fusable(c.view(8, 128), z.view(8, 128), norm_mod))
+
+            # Dtype mismatch
+            self.assertFalse(gdn_epilogue.output_norm_fusable(c.float(), z.float(), norm_mod))
+
+            # Shape mismatch between c and z
+            self.assertFalse(gdn_epilogue.output_norm_fusable(c, z[:1], norm_mod))
+
+            # Weight dim mismatch
+            bad_norm = torch.nn.Module()
+            bad_norm.weight = torch.nn.Parameter(torch.randn(64, dtype=torch.bfloat16))
+            self.assertFalse(gdn_epilogue.output_norm_fusable(c, z, bad_norm))
+
 
 class TestStockFallback(TestBase):
     QKV = 2048
@@ -146,6 +178,17 @@ class TestStockFallback(TestBase):
         for got, ref in ((out_q, ref_q), (out_k, ref_k), (out_v, ref_v)):
             torch.testing.assert_close(got, ref, rtol=0, atol=0)
 
+    def test_output_norm_stock_fallback(self):
+        c = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        z = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        w = torch.randn(128, dtype=torch.bfloat16)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            out = gdn_epilogue.gdn_output_norm_rearrange(c, z, w)
+            ref = gdn_epilogue._stock_output_norm_rearrange(c, z, w)
+            torch.testing.assert_close(out, ref, rtol=0, atol=0)
+            self.assertEqual(out.shape, (2, 512))
+
 
 class TestKernelDispatch(TestBase):
     def test_unpack_dispatches_kernel(self):
@@ -165,4 +208,15 @@ class TestKernelDispatch(TestBase):
             mock.patch.object(gdn_epilogue, "_rearrange_kernel") as kernel,
         ):
             gdn_epilogue.gdn_rearrange(mixed, 1024, 1024, 2048)
+        self.assertEqual(kernel.__getitem__.call_count, 1)
+
+    def test_output_norm_dispatches_kernel(self):
+        c = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        z = torch.randn(2, 4, 128, dtype=torch.bfloat16)
+        w = torch.randn(128, dtype=torch.bfloat16)
+        with (
+            mock.patch.dict(os.environ, {gdn_epilogue.ENV_GDN_OUTPUT_NORM_FUSED: "1"}, clear=True),
+            mock.patch.object(gdn_epilogue, "_output_norm_kernel") as kernel,
+        ):
+            gdn_epilogue.gdn_output_norm_rearrange(c, z, w)
         self.assertEqual(kernel.__getitem__.call_count, 1)
