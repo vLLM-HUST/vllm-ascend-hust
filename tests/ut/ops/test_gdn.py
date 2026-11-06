@@ -15,8 +15,8 @@
 # limitations under the License.
 #
 
-from builtins import __import__ as original_import
 import importlib.util
+from builtins import __import__ as original_import
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +29,6 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
-
 from vllm_ascend.ops.gdn import (
     _PACKED_CONV_WEIGHT_NAME,
     _get_base_conv1d,

@@ -31,7 +31,6 @@ from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -55,7 +54,11 @@ def _get_fla_ops():
     # Resolve optional FLA kernels only when a GDN execution path needs them.
     from fla_npu.ops.ascendc import (
         causal_conv1d_fn as conv1d_fn,
+    )
+    from fla_npu.ops.ascendc import (
         causal_conv1d_update as conv1d_update,
+    )
+    from fla_npu.ops.ascendc import (
         recurrent_gated_delta_rule as recurrent_delta_rule,
     )
 
