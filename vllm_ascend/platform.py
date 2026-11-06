@@ -217,6 +217,11 @@ class NPUPlatform(Platform):
         return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
 
     @classmethod
+    def get_communication_provider_cls(cls) -> str:
+        """Use the shared host contract while retaining the existing HCCL group."""
+        return "vllm_ascend.distributed.communication_provider.HCCLCommunicationProvider"
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """
         Get piecewise backend class for piecewise graph.
