@@ -24,13 +24,12 @@ import subprocess
 import sys
 from sysconfig import get_paths
 
+from build_version import resolve_trusted_scm_version
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
-
-from build_version import resolve_trusted_scm_version
 
 
 def load_module_from_path(module_name, path):
@@ -39,7 +38,6 @@ def load_module_from_path(module_name, path):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
-
 
 
 def discover_torch_npu_path():
