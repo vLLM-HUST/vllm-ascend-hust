@@ -24,12 +24,13 @@ import subprocess
 import sys
 from sysconfig import get_paths
 
-from build_version import resolve_trusted_scm_version
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
+
+from build_version import resolve_trusted_scm_version
 
 
 def load_module_from_path(module_name, path):
@@ -48,7 +49,15 @@ def discover_torch_npu_path():
     if len(locations) != 1:
         raise RuntimeError("torch_npu is not installed in the build interpreter")
     package_path = os.path.realpath(locations[0])
-    header = os.path.join(package_path, "include", "torch_npu", "csrc", "core", "npu", "NPUStream.h")
+    header = os.path.join(
+        package_path,
+        "include",
+        "torch_npu",
+        "csrc",
+        "core",
+        "npu",
+        "NPUStream.h",
+    )
     if not os.path.isfile(header):
         raise RuntimeError(f"torch_npu development header is unavailable: {header}")
     return package_path
