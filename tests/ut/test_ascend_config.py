@@ -25,11 +25,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
-from tests.ut.base import TestBase
-from tests.ut.kvpp_utils import make_kvpp_config
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+
+from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_kvpp_config
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
@@ -2146,8 +2147,9 @@ class TestKVPPConfig(TestBase):
     def test_graph_modes(self):
         from types import SimpleNamespace
 
-        from tests.ut.kvpp_utils import make_kvpp_config
         from vllm.config import CUDAGraphMode
+
+        from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
 
         for mode in CUDAGraphMode:
@@ -2164,8 +2166,9 @@ class TestKVPPConfig(TestBase):
     def test_kv_transfer_connectors(self):
         from copy import deepcopy
 
-        from tests.ut.kvpp_utils import make_kvpp_config
         from vllm.config import KVTransferConfig
+
+        from tests.ut.kvpp_utils import make_kvpp_config
 
         mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
         store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
