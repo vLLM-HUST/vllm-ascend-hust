@@ -46,11 +46,30 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    _choose_layer_tuple_size,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kv_cache_config_deepseek_v4_main,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+
+@pytest.mark.parametrize(
+    ("values", "lower_bound", "expected"),
+    [
+        ([11, 21], 11, 11),
+        ([2, 3], 2, 3),
+        ([4], 8, 8),
+    ],
+)
+def test_choose_layer_tuple_size(values, lower_bound, expected):
+    assert _choose_layer_tuple_size(values, lower_bound=lower_bound) == expected
+
+
+@pytest.mark.parametrize("values", [[], [1, 0], [-1, 2]])
+def test_choose_layer_tuple_size_rejects_invalid_values(values):
+    with pytest.raises(ValueError):
+        _choose_layer_tuple_size(values, lower_bound=1)
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
