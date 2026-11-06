@@ -49,7 +49,7 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 
-(maxsize=1)
+@lru_cache(maxsize=1)
 def _get_fla_ops():
     # All workers import this module, including models that do not use GDN.
     # Resolve optional FLA kernels only when a GDN execution path needs them.

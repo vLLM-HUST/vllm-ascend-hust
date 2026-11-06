@@ -39,7 +39,6 @@ from vllm_ascend.ops.gdn import (
 )
 
 
-.mark.usefixtures("monkeypatch")
 def test_gdn_import_defers_optional_fla_npu(monkeypatch):
     """Non-GDN models must load the worker patch without fla_npu installed."""
 
