@@ -27,7 +27,6 @@ from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
@@ -943,7 +942,7 @@ class AscendConfig:
         self.enable_sp_by_pass = (
             vc.model_config is not None
             and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
+            and getattr(vc.compilation_config.pass_config, "enable_sp", False)
         )
 
         self._validate_mc2_comm_alg(vc)

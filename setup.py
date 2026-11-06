@@ -24,13 +24,12 @@ import subprocess
 import sys
 from sysconfig import get_paths
 
+from build_version import resolve_trusted_scm_version
 from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
-
-from build_version import resolve_trusted_scm_version
 
 
 def load_module_from_path(module_name, path):
@@ -39,6 +38,20 @@ def load_module_from_path(module_name, path):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+
+def discover_torch_npu_path():
+    """Find torch_npu headers in the selected build interpreter."""
+    spec = importlib.util.find_spec("torch_npu")
+    locations = [] if spec is None else list(spec.submodule_search_locations or ())
+    if len(locations) != 1:
+        raise RuntimeError("torch_npu is not installed in the build interpreter")
+    package_path = os.path.realpath(locations[0])
+    header = os.path.join(package_path, "include", "torch_npu", "csrc", "core", "npu", "NPUStream.h")
+    if not os.path.isfile(header):
+        raise RuntimeError(f"torch_npu development header is unavailable: {header}")
+    return package_path
 
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -336,15 +349,8 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
-        torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
-        try:
-            torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
-            torch_npu_path += "/torch_npu"
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrieve torch version version failed: {e}")
-
-        # add TORCH_NPU_PATH
-        cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
+        # Resolve headers from the interpreter running the isolated build.
+        cmake_args += [f"-DTORCH_NPU_PATH={discover_torch_npu_path()}"]
 
         # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
         # When unset (None), CMake will auto-detect from CANN headers.
