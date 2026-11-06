@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import torch
+
 from vllm_ascend.distributed.device_communicators.npu_communicator import (
     NPUCommunicator,
 )
