@@ -1376,6 +1376,16 @@ class TestSubconfigPydanticTypeValidation(TestBase):
 
 
 class TestUpstreamConfigCompatibility(TestBase):
+    def test_missing_upstream_sequence_parallel_pass_defaults_off(self):
+        vc = VllmConfig()
+        vc.model_config.enforce_eager = False
+        vc.compilation_config.pass_config = SimpleNamespace()
+
+        with patch("vllm_ascend.platform.NPUPlatform.check_and_update_config"):
+            config = init_ascend_config(vc)
+
+        self.assertFalse(config.enable_sp_by_pass)
+
     @patch(
         "vllm_ascend.ascend_config.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A5),
