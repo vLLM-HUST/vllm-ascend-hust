@@ -987,6 +987,14 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
+def test_pool_bytes_per_block_accepts_verified_host_one_argument_abi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kv_cache_utils_patch, "_orig_pool_bytes_per_block", lambda groups: 123)
+
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block([]) == 123
+
+
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
@@ -1027,7 +1035,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     )
 
     ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._call_orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
