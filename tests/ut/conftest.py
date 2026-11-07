@@ -46,11 +46,12 @@ if not _npu_available:
     # replacing ``triton.runtime`` with a bare mock makes every CPU UT fail
     # before collection. Only the device-facing driver needs to be mocked.
     triton_runtime = importlib.import_module("triton.runtime")
-    triton_runtime.driver = MagicMock()
-    triton_runtime.driver.active.utils.get_device_properties.return_value = {
+    triton_driver = MagicMock()
+    triton_driver.active.utils.get_device_properties.return_value = {
         "num_aic": 8,
         "num_vectorcore": 8,
     }
+    triton_runtime.driver = triton_driver  # type: ignore[attr-defined]
     torch_npu = types.ModuleType("torch_npu")
     torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
     torch_npu.__path__ = []
