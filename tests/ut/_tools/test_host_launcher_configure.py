@@ -6,8 +6,10 @@ import importlib.util
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -23,6 +25,7 @@ def test_setup_forwards_host_launcher_including_empty_default(tmp_path, monkeypa
         monkeypatch.setenv("VLLM_ASCEND_HOST_COMPILER_LAUNCHER", launcher)
     monkeypatch.setenv("SOC_VERSION", "ascend910b1")
     spec = importlib.util.spec_from_file_location("build_envs", ROOT / "vllm_ascend/envs.py")
+    assert spec is not None and spec.loader is not None
     envs = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(envs)
     module = ast.parse((ROOT / "setup.py").read_text())
@@ -48,7 +51,8 @@ def test_setup_forwards_host_launcher_including_empty_default(tmp_path, monkeypa
         build_lib="build/lib",
         distribution=SimpleNamespace(get_command_obj=lambda _: object()),
     )
-    namespace["configure"](builder, SimpleNamespace(cmake_lists_dir=str(ROOT)))
+    configure_fn = cast(Callable[..., Any], namespace["configure"])
+    configure_fn(builder, SimpleNamespace(cmake_lists_dir=str(ROOT)))
     args = subprocess.check_call.call_args.args[0]
     assert f"-DVLLM_ASCEND_HOST_COMPILER_LAUNCHER={launcher or ''}" in args
     assert not any(a.startswith("-DCMAKE_CXX_COMPILER_LAUNCHER=") for a in args)

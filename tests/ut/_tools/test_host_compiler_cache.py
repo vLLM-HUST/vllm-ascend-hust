@@ -11,6 +11,7 @@ import pytest
 spec = importlib.util.spec_from_file_location(
     "native_cache", Path(__file__).resolve().parents[3] / "csrc/scripts/run_host_compiler_cache.py"
 )
+assert spec is not None and spec.loader is not None
 cache = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cache)
 
@@ -72,6 +73,7 @@ def test_private_scoped_daemon_and_fallback(tmp_path, monkeypatch, available):
     receipt = tmp_path / "stats.json"
     assert cache.run(config, "sccache", ["build"], receipt) == 7
     assert calls[-1] == ["sccache", "--stop-server"]
+    assert secret_file is not None
     assert not secret_file.exists()
     assert receipt.exists() == available
     if available:
