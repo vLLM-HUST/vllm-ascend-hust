@@ -17,7 +17,9 @@
 
 import torch
 import torch.distributed as dist
-from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
 
 
 class _NpuAll2AllManager:
@@ -60,3 +62,9 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        """Return a reduced tensor that does not alias the custom-op input."""
+        output = input_.clone()
+        dist.all_reduce(output, group=self.device_group)
+        return output

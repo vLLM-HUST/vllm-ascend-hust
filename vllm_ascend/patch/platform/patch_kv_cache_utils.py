@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+import inspect
 import math
 from collections import defaultdict
 from dataclasses import replace
@@ -8,7 +9,7 @@ import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -41,6 +42,34 @@ from vllm_ascend.models.glm5next.cache_config import (
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+
+
+def _choose_layer_tuple_size(values: list[int], *, lower_bound: int) -> int:
+    """Choose a tuple size that minimizes upward padding.
+
+    This is kept local because the equivalent vLLM helper is private and has
+    moved between ``kv_cache_utils`` and ``kv_cache_planning`` across supported
+    Host revisions.
+    """
+    if not values:
+        raise ValueError("values must be non-empty")
+    if any(value <= 0 for value in values):
+        raise ValueError(f"values must be positive, got: {values!r}")
+
+    min_size = max(1, lower_bound)
+    max_size = max(values)
+    if min_size > max_size:
+        return min_size
+
+    best_size = min_size
+    best_padding: int | None = None
+    for size in range(min_size, max_size + 1):
+        padding = sum((size - (value % size)) % size for value in values)
+        if best_padding is None or padding < best_padding or (padding == best_padding and size > best_size):
+            best_padding = padding
+            best_size = size
+    return best_size
+
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -318,7 +347,10 @@ def _get_kv_cache_groups_uniform_groups(
     # layer tuples.
     num_layer_tuples_per_group: list[int] = [_get_max_layers_per_page_size(g_spec) for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
-    num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
+    num_layer_tuples = _choose_layer_tuple_size(
+        num_layer_tuples_per_group,
+        lower_bound=num_layer_tuples_per_group[0],
+    )
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
     num_layer_tuples_per_group = [round_up(x, num_layer_tuples) for x in num_layer_tuples_per_group]
 
@@ -538,9 +570,21 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
-def _ascend_pool_bytes_per_block(
-    vllm_config: VllmConfig,
+def _call_orig_pool_bytes_per_block(
+    vllm_config: VllmConfig | None,
     kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """Call the Host helper across its one- and two-argument ABIs."""
+    if len(inspect.signature(_orig_pool_bytes_per_block).parameters) == 1:
+        return _orig_pool_bytes_per_block(kv_cache_groups)
+    if vllm_config is None:
+        raise TypeError("this Host _pool_bytes_per_block ABI requires vllm_config")
+    return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+
+def _ascend_pool_bytes_per_block(
+    vllm_config_or_groups: VllmConfig | list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec] | None = None,
 ) -> int:
     """Use the same DSV4 divisor as Ascend's shared-tuple planner.
 
@@ -550,6 +594,14 @@ def _ascend_pool_bytes_per_block(
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if kv_cache_groups is None:
+        vllm_config = None
+        kv_cache_groups = vllm_config_or_groups
+        assert isinstance(kv_cache_groups, list)
+    else:
+        vllm_config = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -557,7 +609,7 @@ def _ascend_pool_bytes_per_block(
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        return _call_orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples

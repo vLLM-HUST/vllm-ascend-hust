@@ -445,3 +445,100 @@ operator namespace. For historical source, check the restore action's
 | Persistent restore and key orchestration | `.github/actions/csrc-l1-restore/action.yaml` |
 | Persistent changed-snapshot publication | `.github/actions/csrc-l1-save/action.yaml` |
 | Central producer | `.github/workflows/_build_csrc_cache.yaml` |
+
+## Optional host C++ compiler cache
+
+The root `vllm_ascend_C` extension can also reuse individual host C++ objects
+through a compiler launcher. This is complementary to the OPP/third-party L0/L1
+cache described above; it does not replace that engine, its identities, or OBS
+snapshot transport. Linking, AscendC helpers and uncached work still run locally.
+It does not cache Triton kernels, graphs, model state or complete wheels.
+
+`VLLM_ASCEND_HOST_COMPILER_LAUNCHER` is an optional, non-sensitive CMake launcher
+list (semicolon-separated executable and arguments). Its default is empty.
+`setup.py` forwards it on every configure, including the empty default, so removing
+the setting clears a previous selection in a reused build tree. Only the host
+`vllm_ascend_C` target receives this launcher; do not set a global launcher to
+replace AscendC's own build rules. Direct CMake users can pass the same name with
+`-D`. A launcher is not the C++ compiler: do not change `CXX_COMPILER` to sccache.
+Never put credentials in the launcher string, which appears in configure logs.
+
+For an already configured local compiler cache, for example:
+
+```bash
+VLLM_ASCEND_HOST_COMPILER_LAUNCHER=ccache python -m pip install -e . --no-build-isolation
+```
+
+### Shared Redis (opt-in, Linux)
+
+`csrc/scripts/run_host_compiler_cache.py` provides a standalone, standard-library-only
+client for a preinstalled **sccache 0.19.0** with Redis support. The server only
+stores artifacts; it does not run compilers or need the project's Python stack.
+No cache dependency or server connection is added to ordinary builds or serving.
+
+Provision a trusted CA and an owner-only regular JSON file (mode `0600`):
+
+```json
+{
+  "host": "cache.example.invalid",
+  "port": 6380,
+  "username": "project-client",
+  "password": "REPLACE_VIA_SECRET_PROVISIONING",
+  "ca_cert": "ca.crt",
+  "prefix": "native-sccache/your-project/qualified-toolchain/"
+}
+```
+
+This is a schema example, not a working endpoint or credential. Relative CA paths
+resolve beside the configuration. In Kubernetes, inject credentials using your
+secret mechanism; if a projected file is a symlink or not owned with private
+permissions, copy it to an owner-only regular file in the client's private
+writable directory. Recheck permissions after volume remounts. Do not commit
+configuration, passwords, certificate private keys or cached binaries.
+
+```bash
+MAX_JOBS=2 python csrc/scripts/run_host_compiler_cache.py \
+  --config /private/compiler-cache/config.json \
+  --sccache /opt/sccache/sccache \
+  --stats /private/compiler-cache/build-counters.json -- \
+  python -m pip install -e . --no-build-isolation
+```
+
+The wrapper uses verified TLS, a private temporary TOML and an independent Unix
+socket/daemon for this build. Passwords are not placed in arguments or the child
+environment. It clears inherited `SCCACHE_*` settings and rejects an existing host
+or global launcher rather than silently replacing one. The sccache executable,
+configuration permissions and CA must be provisioned correctly; invalid local
+configuration is an error, not an unnoticed cache bypass.
+
+A failed or timed-out daemon startup warns and runs the requested build with an
+empty host launcher. Cache I/O failures use sccache's local-compilation fallback.
+The startup probe has a 20-second timeout; this is **not** an end-to-end bound on
+mid-build network failures or compilation. Normal exit stops the owned daemon;
+its idle limit is 600 seconds. Optional statistics cover only that daemon's
+lifetime: counters lost after an idle restart do not prove zero compilation.
+Test an outage with an unreachable endpoint in a private test configuration,
+never by stopping a shared server. To disable this integration, run the normal
+build without the wrapper and unset the host launcher variable.
+
+Give each project its own trusted writer account and Redis ACL prefix. A prefix
+alone is neither authorization nor a memory quota. Use compatible compiler,
+headers, target and ABI inputs; sccache computes per-compilation identities, so
+unrelated application commits do not need to invalidate all cached objects.
+Different Triton versions do not require separate Redis servers, but Triton JIT
+client integration and qualification are outside this host-only feature.
+
+### Validation boundary
+
+CPU tests cover the real setup configure method's forwarding/default clearing,
+private configuration, isolated daemon lifecycle, startup failure/timeout and
+local build continuation. The prerequisite aarch64 trial built the real root
+extension with Torch 2.13, torch-npu 2.13rc1 and CANN 9.1: five host object misses
+became five remote hits in a fresh build tree. Source/header/flag changes caused
+appropriate misses, and an unreachable endpoint allowed a local build.
+
+This is build-cache evidence, not full-wheel, serving or numerical qualification.
+The extension's AscendC helper queries the SoC at load time; both cold and cached
+artifacts failed that initialization in the no-device container. Actual device
+loading and execution remain hardware validation work. Neither CPU compilation
+nor cache hits should be reported as NPU correctness.
