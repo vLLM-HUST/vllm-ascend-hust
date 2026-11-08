@@ -14,9 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import sys
+from unittest.mock import MagicMock
+
 import torch
 
-from vllm_ascend.compilation.compiler_interface import _disable_pytorch_aot_cache_for_npugraph_ex
+_stubbed_nge = importlib.util.find_spec("npugraph_ex") is None
+if _stubbed_nge:
+    sys.modules["npugraph_ex"] = MagicMock()
+    sys.modules["npugraph_ex._acl_concrete_graph"] = MagicMock()
+    sys.modules["npugraph_ex._acl_concrete_graph.static_kernel"] = MagicMock()
+try:
+    from vllm_ascend.compilation.compiler_interface import _disable_pytorch_aot_cache_for_npugraph_ex
+finally:
+    if _stubbed_nge:
+        del sys.modules["npugraph_ex._acl_concrete_graph.static_kernel"]
+        del sys.modules["npugraph_ex._acl_concrete_graph"]
+        del sys.modules["npugraph_ex"]
 
 
 def test_npugraph_ex_aot_cache_settings_are_scoped():

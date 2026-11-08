@@ -45,6 +45,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
+    # Optional CMake semicolon-separated launcher list for host C++ only.
+    # Default "" leaves the ordinary build unchanged. Non-sensitive: executable
+    # and arguments only; never put credentials here (CMake logs this value).
+    "VLLM_ASCEND_HOST_COMPILER_LAUNCHER": lambda: os.getenv("VLLM_ASCEND_HOST_COMPILER_LAUNCHER", ""),
     # The C compiler used for compiling the package. If not set, the default
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER": lambda: os.getenv("C_COMPILER", None),

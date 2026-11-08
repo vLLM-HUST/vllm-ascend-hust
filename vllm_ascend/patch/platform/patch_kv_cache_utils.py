@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+import inspect
 import math
 from collections import defaultdict
 from dataclasses import replace
@@ -569,9 +570,21 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
-def _ascend_pool_bytes_per_block(
-    vllm_config: VllmConfig,
+def _call_orig_pool_bytes_per_block(
+    vllm_config: VllmConfig | None,
     kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """Call the Host helper across its one- and two-argument ABIs."""
+    if len(inspect.signature(_orig_pool_bytes_per_block).parameters) == 1:
+        return _orig_pool_bytes_per_block(kv_cache_groups)
+    if vllm_config is None:
+        raise TypeError("this Host _pool_bytes_per_block ABI requires vllm_config")
+    return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+
+def _ascend_pool_bytes_per_block(
+    vllm_config_or_groups: VllmConfig | list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec] | None = None,
 ) -> int:
     """Use the same DSV4 divisor as Ascend's shared-tuple planner.
 
@@ -581,6 +594,14 @@ def _ascend_pool_bytes_per_block(
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if kv_cache_groups is None:
+        vllm_config = None
+        kv_cache_groups = vllm_config_or_groups
+        assert isinstance(kv_cache_groups, list)
+    else:
+        vllm_config = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -588,7 +609,7 @@ def _ascend_pool_bytes_per_block(
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        return _call_orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
 
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
