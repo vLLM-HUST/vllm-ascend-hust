@@ -256,8 +256,12 @@ log_selected_ops
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "preserving csrc/build and cleaning output dirs"
-  rm -rf -- output build_out
+  # AscendC preprocessing may mutate generated objects in place.  Reusing the
+  # CMake tree can therefore feed a postprocessed file back to the linker on a
+  # later wheel build.  Keep only the content-addressed build_cache; a failed or
+  # completed build tree is always disposable and must be recreated.
+  log "preserving csrc/build_cache and cleaning generated build/output dirs"
+  rm -rf -- build output build_out
 
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"

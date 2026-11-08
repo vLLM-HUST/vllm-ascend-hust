@@ -64,6 +64,10 @@ def discover_torch_npu_path():
 
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+native_build_guard = load_module_from_path(
+    "native_build_guard",
+    os.path.join(ROOT_DIR, "tools", "native_build_guard.py"),
+)
 
 
 def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
@@ -377,15 +381,15 @@ class cmake_build_ext(build_ext):
     def build_extensions(self) -> None:
         if not envs.COMPILE_CUSTOM_KERNELS:
             return
+        with native_build_guard.exclusive_clean_build_tree(self.build_temp):
+            self._build_extensions_in_clean_tree()
+
+    def _build_extensions_in_clean_tree(self) -> None:
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
         except OSError as e:
             raise RuntimeError(f"Cannot find CMake executable: {e}")
-
-        # Create build directory if it does not exist.
-        if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
 
         targets = []
 
