@@ -290,7 +290,9 @@ class cmake_build_ext(build_ext):
         # find PYTHON_INCLUDE_PATH
         check_or_set_default_env(cmake_args, "PYTHON_INCLUDE_PATH", get_paths()["include"])
 
-        # ccache and ninja can not be applied at ascendc kernels now
+        # Scope the launcher to host C++; AscendC keeps its own build rules.
+        # Always forward the empty default to clear a previous cached selection.
+        cmake_args += [f"-DVLLM_ASCEND_HOST_COMPILER_LAUNCHER={envs.VLLM_ASCEND_HOST_COMPILER_LAUNCHER}"]
 
         try:
             # if pybind11 is installed via pip

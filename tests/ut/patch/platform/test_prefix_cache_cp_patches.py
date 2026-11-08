@@ -46,11 +46,30 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    _choose_layer_tuple_size,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kv_cache_config_deepseek_v4_main,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+
+@pytest.mark.parametrize(
+    ("values", "lower_bound", "expected"),
+    [
+        ([11, 21], 11, 11),
+        ([2, 3], 2, 3),
+        ([4], 8, 8),
+    ],
+)
+def test_choose_layer_tuple_size(values, lower_bound, expected):
+    assert _choose_layer_tuple_size(values, lower_bound=lower_bound) == expected
+
+
+@pytest.mark.parametrize("values", [[], [1, 0], [-1, 2]])
+def test_choose_layer_tuple_size_rejects_invalid_values(values):
+    with pytest.raises(ValueError):
+        _choose_layer_tuple_size(values, lower_bound=1)
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
@@ -968,6 +987,14 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
+def test_pool_bytes_per_block_accepts_verified_host_one_argument_abi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kv_cache_utils_patch, "_orig_pool_bytes_per_block", lambda groups: 123)
+
+    assert kv_cache_utils_patch._ascend_pool_bytes_per_block([]) == 123
+
+
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
@@ -1008,7 +1035,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     )
 
     ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._call_orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
     assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
