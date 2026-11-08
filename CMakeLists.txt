@@ -102,6 +102,13 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+# Do not set CMAKE_CXX_COMPILER_LAUNCHER globally: AscendC owns its launchers.
+set(VLLM_ASCEND_HOST_COMPILER_LAUNCHER "" CACHE STRING
+    "Optional CMake launcher list for vllm_ascend_C host C++ objects only")
+if(VLLM_ASCEND_HOST_COMPILER_LAUNCHER)
+  set_property(TARGET vllm_ascend_C PROPERTY CXX_COMPILER_LAUNCHER
+               "${VLLM_ASCEND_HOST_COMPILER_LAUNCHER}")
+endif()
 if(SOC_VERSION MATCHES "ascend910_93.*")
   target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
