@@ -5,12 +5,10 @@ import math
 from collections import defaultdict
 from dataclasses import replace
 
-import vllm.v1.core.kv_cache_planning
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -26,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.kv_cache_planning import kv_cache_planning, may_override_num_blocks
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -75,12 +74,12 @@ def _choose_layer_tuple_size(values: list[int], *, lower_bound: int) -> int:
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
-_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_planning._get_kv_cache_groups_uniform_page_size
-_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_planning.get_kv_cache_groups
-_orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_planning._get_packed_kv_cache_groups
-_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups
-_orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups
-_orig_pool_bytes_per_block = vllm.v1.core.kv_cache_planning._pool_bytes_per_block
+_orig_get_kv_cache_groups_uniform_page_size = kv_cache_planning._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = kv_cache_planning.get_kv_cache_groups
+_orig_get_packed_kv_cache_groups = kv_cache_planning._get_packed_kv_cache_groups
+_orig_get_kv_cache_config_from_groups = kv_cache_planning.get_kv_cache_config_from_groups
+_orig_max_memory_usage_bytes_from_groups = kv_cache_planning._max_memory_usage_bytes_from_groups
+_orig_pool_bytes_per_block = kv_cache_planning._pool_bytes_per_block
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -438,7 +437,7 @@ def _ascend_get_packed_kv_cache_groups(
         groups,
         use_trailing_layer_fallback=cache_utils._uses_trailing_mtp_layers(vllm_config),
     )
-    vllm.v1.core.kv_cache_planning._warn_if_unannotated_eagle_mamba(
+    kv_cache_planning._warn_if_unannotated_eagle_mamba(
         vllm_config,
         groups,
     )
@@ -737,15 +736,15 @@ def _ascend_get_kv_cache_config_from_groups(
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 assert _orig_get_packed_kv_cache_groups is not None
-vllm.v1.core.kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
-vllm.v1.core.kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-vllm.v1.core.kv_cache_planning.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
+kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
+kv_cache_planning.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
-vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
-vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
-vllm.v1.core.kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
+kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
+kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402
