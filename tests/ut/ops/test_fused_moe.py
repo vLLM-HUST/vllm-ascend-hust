@@ -122,6 +122,7 @@ def _build_apply_layer():
         log2phy=None,
         ascend_pertoken_scale=None,
         ascend_mc2_mask=None,
+        moe_config=SimpleNamespace(num_experts=4),
     )
 
 

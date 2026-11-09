@@ -27,7 +27,7 @@ def test_packed_groups_use_matching_eagle_annotation_api(use_fallback):
         _uses_trailing_mtp_layers=predicate,
     )
     with (
-        patch.object(cache_patch.vllm.v1.core, "kv_cache_utils", upstream),
+        patch.object(cache_patch, "kv_cache_planning", upstream),
         patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
         patch.object(cache_patch, "group_cache_specs", return_value=specs),
         patch.object(cache_patch, "make_cache_groups", return_value=groups),
