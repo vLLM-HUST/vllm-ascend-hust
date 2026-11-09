@@ -1,10 +1,22 @@
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+
+try:
+    from vllm.v1.spec_decode.medusa import MedusaProposer
+except ModuleNotFoundError as exc:
+    _MEDUSA_IMPORT_ERROR = exc
+
+    class MedusaProposer:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "Medusa speculative decoding is unavailable in this vLLM version."
+            ) from _MEDUSA_IMPORT_ERROR
+else:
+    _MEDUSA_IMPORT_ERROR = None
 
 
 class AscendMedusaProposer(MedusaProposer):
