@@ -7,6 +7,7 @@ branches still expose them from ``kv_cache_utils``.
 
 from importlib import import_module
 from types import ModuleType
+from typing import Any
 
 
 def _load_kv_cache_planning() -> ModuleType:
@@ -18,7 +19,10 @@ def _load_kv_cache_planning() -> ModuleType:
         return import_module("vllm.v1.core.kv_cache_utils")
 
 
-kv_cache_planning = _load_kv_cache_planning()
+# The selected Host module is deliberately version-dependent and includes
+# private helpers patched by this compatibility layer. ``ModuleType`` cannot
+# describe those release-specific attributes to mypy.
+kv_cache_planning: Any = _load_kv_cache_planning()
 
 create_kv_cache_group_specs = kv_cache_planning.create_kv_cache_group_specs
 get_kv_cache_groups = kv_cache_planning.get_kv_cache_groups
