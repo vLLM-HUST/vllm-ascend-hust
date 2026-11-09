@@ -46,7 +46,7 @@ def default_vllm_config():
 @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float32)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
-@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm, create=True)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
 @patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias)
 def test_RMSNorm_forward(
     mock_add_rms_norm_bias, mock_add_rmsnorm, mock_rmsnorm, residual, dummy_tensor, default_vllm_config
@@ -77,7 +77,7 @@ def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_co
 
 @patch("vllm_ascend.ops.layernorm._HAS_ACLNN_ADD_RMS_NORM_BIAS", False)
 @patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
-@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm, create=True)
 @patch(
     "torch.ops._C_ascend.npu_add_rms_norm_bias",
     side_effect=mock_add_rms_norm_bias,
