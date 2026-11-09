@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vllm-ascend project
 
+import inspect
 from contextlib import AbstractContextManager
 
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -149,16 +150,21 @@ def initialize_kv_cache(
             self.compilation_config.cudagraph_mode,
             piecewise_capture_available=piecewise_capture_available,
         )
-    cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+    resolve_cudagraph = self.compilation_config.resolve_cudagraph_mode_and_sizes
+    resolver_kwargs = {
+        "use_v2_model_runner": True,
+        "kv_cache_config": self.kv_cache_config,
+        "max_num_reqs": self.max_num_reqs,
+        "is_profiling": is_profiling,
+        "piecewise_capture_available": piecewise_capture_available,
+    }
+    if "tensor_parallel_size" in inspect.signature(resolve_cudagraph).parameters:
+        resolver_kwargs["tensor_parallel_size"] = self.parallel_config.tensor_parallel_size
+    cudagraph_mode = resolve_cudagraph(
         attn_cg_support.min_cg_support,
         attn_cg_support.min_cg_attn_backend,
         self.decode_query_len,
-        use_v2_model_runner=True,
-        tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-        kv_cache_config=self.kv_cache_config,
-        max_num_reqs=self.max_num_reqs,
-        is_profiling=is_profiling,
-        piecewise_capture_available=piecewise_capture_available,
+        **resolver_kwargs,
     )
     self.cudagraph_manager = upstream.ModelCudaGraphManager(
         self.vllm_config,

@@ -93,9 +93,16 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
         for pcp_rank in range(2):
             for tp_rank in range(2):
                 group = SimpleNamespace(world_size=4, rank_in_group=dp_rank * 2 + pcp_rank, cpu_group=object())
+                head_rank = tp_rank * 4 + dp_rank * 2 + pcp_rank
                 monkeypatch.setattr(embedding_mod, "get_engram_dp_group", lambda group=group: group)
                 monkeypatch.setattr(embedding_mod, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank)
-                monkeypatch.setattr(upstream_engram, "get_engram_dp_group", lambda group=group: group)
+                monkeypatch.setattr(embedding_mod, "engram_head_shard_rank", lambda rank=head_rank: rank)
+                monkeypatch.setattr(
+                    upstream_engram,
+                    "get_engram_dp_group",
+                    lambda group=group: group,
+                    raising=False,
+                )
                 monkeypatch.setattr(upstream_engram, "get_tensor_model_parallel_rank", lambda rank=tp_rank: rank)
                 table = embedding_mod.AscendParallelEngramEmbedding(
                     36, 64, head_sizes, 0, cpu_offload=True, dp_shared_memory=shared, storage_dtype=expected.dtype

@@ -31,12 +31,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config
+from transformers import DeepseekV2Config, DeepseekV3Config, DeepseekV4Config
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
-from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 

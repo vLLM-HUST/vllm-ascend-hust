@@ -826,6 +826,15 @@ class TestNPUPlatform(TestBase):
 
                 self.assertEqual(pass_config.sp_min_token_num, 512)
 
+    def test_apply_config_platform_defaults_accepts_current_pass_config(self):
+        pass_config = SimpleNamespace()
+        vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(pass_config=pass_config))
+
+        with patch("vllm_ascend.platform._get_reduced_cg_cap", return_value=None):
+            self.platform.apply_config_platform_defaults(vllm_config)
+
+        self.assertFalse(hasattr(pass_config, "sp_min_token_num"))
+
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
 

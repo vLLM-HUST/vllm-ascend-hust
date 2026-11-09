@@ -9,7 +9,6 @@ import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -25,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.kv_cache_planning import kv_cache_planning, may_override_num_blocks
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -74,12 +74,12 @@ def _choose_layer_tuple_size(values: list[int], *, lower_bound: int) -> int:
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
-_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
-_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
-_orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
-_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
-_orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
-_orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
+_orig_get_kv_cache_groups_uniform_page_size = kv_cache_planning._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = kv_cache_planning.get_kv_cache_groups
+_orig_get_packed_kv_cache_groups = kv_cache_planning._get_packed_kv_cache_groups
+_orig_get_kv_cache_config_from_groups = kv_cache_planning.get_kv_cache_config_from_groups
+_orig_max_memory_usage_bytes_from_groups = kv_cache_planning._max_memory_usage_bytes_from_groups
+_orig_pool_bytes_per_block = kv_cache_planning._pool_bytes_per_block
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -437,7 +437,7 @@ def _ascend_get_packed_kv_cache_groups(
         groups,
         use_trailing_layer_fallback=cache_utils._uses_trailing_mtp_layers(vllm_config),
     )
-    vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
+    kv_cache_planning._warn_if_unannotated_eagle_mamba(
         vllm_config,
         groups,
     )
@@ -616,16 +616,37 @@ def _ascend_pool_bytes_per_block(
 
 
 def _ascend_max_memory_usage_bytes_from_groups(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
+    builder_or_config: object,
+    vllm_config_or_groups: VllmConfig | list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec] | None = None,
 ) -> int:
-    """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    """Keep the pre-#51718 DSV4 admission formula for its shared tuples.
+
+    The Host added ``KVCacheConfigBuilder`` as the first argument on main.
+    Accept both Host ABIs because supported release branches still call the
+    two-argument form.
+    """
+    if kv_cache_groups is None:
+        builder = None
+        vllm_config = builder_or_config
+        kv_cache_groups = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+        assert isinstance(kv_cache_groups, list)
+    else:
+        builder = builder_or_config
+        vllm_config = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+        if len(inspect.signature(_orig_max_memory_usage_bytes_from_groups).parameters) == 2:
+            return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+        if builder is None:
+            raise TypeError("this Host memory-planning ABI requires KVCacheConfigBuilder")
+        return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
 
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
@@ -715,15 +736,15 @@ def _ascend_get_kv_cache_config_from_groups(
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 assert _orig_get_packed_kv_cache_groups is not None
-vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
-vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
+kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
+kv_cache_planning.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
-vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
-vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
-vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
+kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
+kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402

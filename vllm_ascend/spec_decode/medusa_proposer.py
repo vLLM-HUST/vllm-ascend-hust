@@ -1,13 +1,33 @@
+from typing import Any
+
 import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
+_MEDUSA_IMPORT_ERROR: ModuleNotFoundError | None = None
+MedusaProposerBase: Any
 
-class AscendMedusaProposer(MedusaProposer):
+try:
+    from vllm.v1.spec_decode.medusa import MedusaProposer as _HostMedusaProposer
+except ModuleNotFoundError as exc:
+    _MEDUSA_IMPORT_ERROR = exc
+
+    class _MissingMedusaProposer:
+        def __init__(self, *args, **kwargs):
+            assert _MEDUSA_IMPORT_ERROR is not None
+            raise RuntimeError(
+                "Medusa speculative decoding is unavailable in this vLLM version."
+            ) from _MEDUSA_IMPORT_ERROR
+
+    MedusaProposerBase = _MissingMedusaProposer
+else:
+    MedusaProposerBase = _HostMedusaProposer
+
+
+class AscendMedusaProposer(MedusaProposerBase):
     """
     Medusa proposer class for generating token sequences
     """

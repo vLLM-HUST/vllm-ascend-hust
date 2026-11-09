@@ -77,8 +77,12 @@ def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_co
 
 @patch("vllm_ascend.ops.layernorm._HAS_ACLNN_ADD_RMS_NORM_BIAS", False)
 @patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
-@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
-@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias)
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm, create=True)
+@patch(
+    "torch.ops._C_ascend.npu_add_rms_norm_bias",
+    side_effect=mock_add_rms_norm_bias,
+    create=True,
+)
 def test_RMSNorm_falls_back_when_vendor_bias_op_is_missing(
     mock_add_rms_norm_bias,
     mock_add_rmsnorm,

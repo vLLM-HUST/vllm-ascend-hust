@@ -196,6 +196,7 @@ def test_init_block_table_layout_tensors_builds_distinct_sizes():
     tables.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8)) for _ in range(2)]
     tables.input_block_tables = [torch.zeros(2, 8) for _ in range(2)]
     tables._slot_mapping_enabled = [True, False]
+    tables._sliding_window_reach = [0, 0]
     tables.init_block_table_layout_tensors()
 
     assert torch.equal(tables.kernel_block_sizes_tensor, torch.tensor([8, 8], dtype=torch.int32))

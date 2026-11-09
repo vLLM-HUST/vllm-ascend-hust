@@ -44,6 +44,7 @@ def test_setup_forwards_host_launcher_including_empty_default(tmp_path, monkeypa
         ROOT_DIR=str(ROOT),
         develop=type("Develop", (), {}),
         get_paths=lambda: {"include": "/python/include"},
+        discover_torch_npu_path=lambda: "/torch_npu",
     )
     exec(compile(ast.Module(body=[helper, configure], type_ignores=[]), str(ROOT / "setup.py"), "exec"), namespace)
     builder = SimpleNamespace(

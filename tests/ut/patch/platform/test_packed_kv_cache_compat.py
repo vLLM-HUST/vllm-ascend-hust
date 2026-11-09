@@ -21,13 +21,14 @@ def test_packed_groups_use_matching_eagle_annotation_api(use_fallback):
     predicate = MagicMock(return_value=use_fallback)
     annotator = MagicMock(side_effect=annotate)
     warning = MagicMock()
-    upstream = SimpleNamespace(
+    cache_utils = SimpleNamespace(
         _annotate_eagle_groups=annotator,
-        _warn_if_unannotated_eagle_mamba=warning,
         _uses_trailing_mtp_layers=predicate,
     )
+    planning = SimpleNamespace(_warn_if_unannotated_eagle_mamba=warning)
     with (
-        patch.object(cache_patch.vllm.v1.core, "kv_cache_utils", upstream),
+        patch.object(cache_patch.vllm.v1.core, "kv_cache_utils", cache_utils),
+        patch.object(cache_patch, "kv_cache_planning", planning),
         patch.object(cache_patch, "is_deepseek_v41_cache", return_value=True),
         patch.object(cache_patch, "group_cache_specs", return_value=specs),
         patch.object(cache_patch, "make_cache_groups", return_value=groups),
