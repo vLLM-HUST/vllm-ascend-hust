@@ -1,8 +1,8 @@
 import pytest
 
 from vllm_ascend.spec_decode.medusa_proposer import (
-    AscendMedusaProposer,
     _MEDUSA_IMPORT_ERROR,
+    AscendMedusaProposer,
 )
 
 
