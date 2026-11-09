@@ -935,6 +935,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.kv_cache_tensors == [planned_tensor]
 
     needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+        MagicMock(),
         vllm_config,
         kv_cache_config.kv_cache_groups,
     )
@@ -993,6 +994,34 @@ def test_pool_bytes_per_block_accepts_verified_host_one_argument_abi(
     monkeypatch.setattr(kv_cache_utils_patch, "_orig_pool_bytes_per_block", lambda groups: 123)
 
     assert kv_cache_utils_patch._ascend_pool_bytes_per_block([]) == 123
+
+
+def test_max_memory_usage_forwards_current_host_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def host_helper(builder, vllm_config, groups):
+        calls.append((builder, vllm_config, groups))
+        return 123
+
+    monkeypatch.setattr(
+        kv_cache_utils_patch,
+        "_orig_max_memory_usage_bytes_from_groups",
+        host_helper,
+    )
+    builder = MagicMock()
+    vllm_config = MagicMock()
+
+    assert (
+        kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+            builder,
+            vllm_config,
+            [],
+        )
+        == 123
+    )
+    assert calls == [(builder, vllm_config, [])]
 
 
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:

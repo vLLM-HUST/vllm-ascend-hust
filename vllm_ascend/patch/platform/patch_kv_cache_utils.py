@@ -617,16 +617,37 @@ def _ascend_pool_bytes_per_block(
 
 
 def _ascend_max_memory_usage_bytes_from_groups(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
+    builder_or_config: object,
+    vllm_config_or_groups: VllmConfig | list[KVCacheGroupSpec],
+    kv_cache_groups: list[KVCacheGroupSpec] | None = None,
 ) -> int:
-    """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    """Keep the pre-#51718 DSV4 admission formula for its shared tuples.
+
+    The Host added ``KVCacheConfigBuilder`` as the first argument on main.
+    Accept both Host ABIs because supported release branches still call the
+    two-argument form.
+    """
+    if kv_cache_groups is None:
+        builder = None
+        vllm_config = builder_or_config
+        kv_cache_groups = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+        assert isinstance(kv_cache_groups, list)
+    else:
+        builder = builder_or_config
+        vllm_config = vllm_config_or_groups
+        assert not isinstance(vllm_config, list)
+
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
-        return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+        if len(inspect.signature(_orig_max_memory_usage_bytes_from_groups).parameters) == 2:
+            return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+        if builder is None:
+            raise TypeError("this Host memory-planning ABI requires KVCacheConfigBuilder")
+        return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
 
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
