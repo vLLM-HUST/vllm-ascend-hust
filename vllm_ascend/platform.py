@@ -356,7 +356,9 @@ class NPUPlatform(Platform):
         # default, an explicit SP/MMRS request is disabled during VllmConfig
         # validation before the graph fusion pass can observe it.
         pass_config = vllm_config.compilation_config.pass_config
-        if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
+        if (getattr(pass_config, "enable_sp", False) or getattr(pass_config, "fuse_gemm_comms", False)) and getattr(
+            pass_config, "sp_min_token_num", None
+        ) is None:
             pass_config.sp_min_token_num = 1
 
         # TODO: Remove this memory-saving capture-size override and its ceiling
