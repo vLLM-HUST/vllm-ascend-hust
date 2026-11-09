@@ -16,6 +16,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import inspect
+
 import torch
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -48,23 +50,30 @@ class AscendBlockTables(BlockTables):
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
-        # Forward the per-group sharding selection when supplied by the caller.
-        super_kwargs: dict[str, list[bool]] = {}
-        if dcp_sharded is not None:
+        self.kernel_block_sizes = kernel_block_sizes
+
+        # Host main removed ``kernel_block_sizes`` after making block-table
+        # geometry independent from attention kernel geometry. Release
+        # branches still accept it, so forward only the parameters supported
+        # by the active Host ABI.
+        super_params = inspect.signature(super().__init__).parameters
+        accepts_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in super_params.values())
+        super_kwargs = {
+            "block_sizes": block_sizes,
+            "max_num_reqs": max_num_reqs,
+            "max_num_batched_tokens": max_num_batched_tokens,
+            "max_num_blocks_per_group": max_num_blocks_per_group,
+            "device": device,
+            "cp_size": cp_size,
+            "cp_rank": cp_rank,
+            "cp_interleave": cp_interleave,
+            "slot_mapping_enabled": slot_mapping_enabled,
+        }
+        if "kernel_block_sizes" in super_params or accepts_kwargs:
+            super_kwargs["kernel_block_sizes"] = kernel_block_sizes
+        if dcp_sharded is not None and ("dcp_sharded" in super_params or accepts_kwargs):
             super_kwargs["dcp_sharded"] = dcp_sharded
-        super().__init__(
-            block_sizes,
-            max_num_reqs,
-            max_num_batched_tokens,
-            max_num_blocks_per_group,
-            device,
-            kernel_block_sizes,
-            cp_size,
-            cp_rank,
-            cp_interleave,
-            slot_mapping_enabled=slot_mapping_enabled,
-            **super_kwargs,
-        )
+        super().__init__(**super_kwargs)
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
         # touched by one token tile. Use the smallest kernel block size to
@@ -88,6 +97,16 @@ class AscendBlockTables(BlockTables):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def init_block_table_layout_tensors(self) -> None:
+        """Build Host layout tensors plus Ascend's kernel block sizes."""
+        super().init_block_table_layout_tensors()
+        if hasattr(self, "kernel_block_sizes"):
+            self.kernel_block_sizes_tensor = torch.tensor(
+                self.kernel_block_sizes,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
     def compute_slot_mappings(
         self,
