@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import vllm.v1.core.kv_cache_planning as vllm_kv_cache_planning
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
@@ -39,6 +38,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     register_ascend_kv_cache_specs,
 )
+from vllm_ascend.kv_cache_planning import kv_cache_planning as vllm_kv_cache_planning
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
