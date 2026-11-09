@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
+import vllm.v1.core.kv_cache_planning as vllm_kv_cache_planning
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
@@ -1037,7 +1037,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
     upstream_bytes_per_block = kv_cache_utils_patch._call_orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
-    assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    assert vllm_kv_cache_planning._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
 
     expected_num_blocks = 7
     replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
@@ -1331,7 +1331,7 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         block_size=16,
         shapes=((1,),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="none",
+        mamba_cache_mode="align",
     )
     block_pool = BlockPool(
         10,
