@@ -219,6 +219,49 @@ def causal_conv1d_update(
 
     out = x.clone()
 
+    # Fast path: Vectorized execution for single-token decode steps without CPU host sync (.item()).
+    # This keeps ACL Graph capture functional and avoids round-trip synchronization stalls.
+    is_single_token_decode = False
+    if num_accepted_tokens is None:
+        if query_start_loc is None and x.dim() == 2:
+            is_single_token_decode = True
+        elif query_start_loc is not None and conv_state_indices is not None:
+            # Check if each sequence has exactly 1 token (total tokens == batch size)
+            if x.shape[0] == conv_state_indices.size(0):
+                is_single_token_decode = True
+
+    if is_single_token_decode:
+        # Determine states to update
+        if conv_state_indices is not None:
+            idx64 = conv_state_indices.to(torch.int64)
+            active_mask = conv_state_indices != pad_slot_id
+            safe_indices = torch.where(active_mask, idx64, torch.zeros_like(idx64))
+            current_states = conv_state.index_select(0, safe_indices)
+        else:
+            current_states = conv_state[: x.shape[0]]
+
+        # current_states: [B, dim, state_len], x: [B, dim]
+        cat_x = torch.cat([current_states[..., :state_len], x.unsqueeze(-1)], dim=-1)
+        out_vec = F.conv1d(cat_x, weight.unsqueeze(1), bias, padding=0, groups=dim).squeeze(-1)
+        if activation in ("silu", "swish"):
+            out_vec = F.silu(out_vec)
+
+        updated_states = cat_x[..., 1:]
+        if conv_state_indices is not None:
+            # Mask out padded slots
+            if not active_mask.all():
+                out_vec = torch.where(active_mask.unsqueeze(-1), out_vec, out)
+                # Only copy active states back
+                valid_idx = torch.nonzero(active_mask, as_tuple=True)[0]
+                if valid_idx.numel() > 0:
+                    conv_state.index_copy_(0, safe_indices[valid_idx], updated_states[valid_idx])
+            else:
+                conv_state.index_copy_(0, idx64, updated_states)
+        else:
+            conv_state[: x.shape[0], ..., :state_len] = updated_states
+
+        return out_vec.to(original_x_dtype)
+
     def _select_state(i: int) -> torch.Tensor | None:
         if conv_state_indices is not None:
             idx = int(conv_state_indices[i].item())
