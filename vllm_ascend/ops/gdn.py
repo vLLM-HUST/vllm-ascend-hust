@@ -45,6 +45,7 @@ from vllm_ascend.ops.gdn_epilogue import (
     is_output_norm_enabled,
     output_norm_fusable,
 )
+from vllm_ascend.ops.gdn_input_norm_host import gdn_split_ba, is_split_ba_enabled
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -242,9 +243,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
         return o.unsqueeze(0), final_state
 
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if is_split_ba_enabled():
+            return gdn_split_ba(ba)
         if hasattr(self, "split_ba"):
             return self.split_ba(ba)
-        return ba.chunk(2, dim=-1)
+        b, a = ba.chunk(2, dim=-1)
+        return b.contiguous(), a.contiguous()
 
     def get_state_shape(
         self,
