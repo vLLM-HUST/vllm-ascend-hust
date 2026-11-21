@@ -108,6 +108,12 @@ def _rearrange_mixed_qkv(layer, mixed_qkv):
     )
 
 
+_FUSE_GDN_QKV_NORM = (
+    os.environ.get("VLLM_HUST_GDN_QKV_NORM", "0") == "1"
+    and os.environ.get("USE_DEFAULT_FLA_NORM", "0") == "0"
+)
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -554,7 +560,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = _rearrange_mixed_qkv(self, mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = _rearrange_mixed_qkv(self, mixed_qkv_non_spec)
+        qk_non_spec_normalized = False
+        if (
+            _FUSE_GDN_QKV_NORM
+            and spec_sequence_masks is None
+            and self.num_spec == 0
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+            and attn_metadata.num_decode_tokens == 16
+            and mixed_qkv_non_spec is not None
+            and mixed_qkv_non_spec.shape == (16, 4096)
+            and mixed_qkv_non_spec.stride() == (4096, 1)
+            and mixed_qkv_non_spec.dtype == torch.bfloat16
+            and mixed_qkv_non_spec.device.type == "npu"
+            and not mixed_qkv_non_spec.requires_grad
+            and self.key_dim // self.tp_size == 1024
+            and self.value_dim // self.tp_size == 2048
+            and self.head_k_dim == 128
+            and self.head_v_dim == 128
+            and get_pcp_group().world_size == 1
+        ):
+            from vllm_ascend_split_batch.gdn_qkv_norm import unpack_norm
+
+            query_non_spec, key_non_spec, value_non_spec = unpack_norm(
+                mixed_qkv_non_spec
+            )
+            qk_non_spec_normalized = True
+        else:
+            query_non_spec, key_non_spec, value_non_spec = _rearrange_mixed_qkv(
+                self, mixed_qkv_non_spec
+            )
 
         # 2. Recurrent attention
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
@@ -693,8 +728,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention, HpcModule):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
+            if not qk_non_spec_normalized:
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
             # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
             core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
