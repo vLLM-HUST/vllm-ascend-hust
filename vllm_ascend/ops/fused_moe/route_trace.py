@@ -74,6 +74,7 @@ class GmmRouteTracer:
         local_experts: int,
         log2phy: dict[str, int],
         layer_id_to_index: dict[int, int],
+        layer_obj_to_index: dict[int, int] | None = None,
         device: torch.device,
     ) -> None:
         self.trace_dir = Path(trace_dir)
@@ -86,6 +87,7 @@ class GmmRouteTracer:
         self.local_experts = int(local_experts)
         self.log2phy = dict(log2phy)
         self.layer_id_to_index = dict(layer_id_to_index)
+        self.layer_obj_to_index = dict(layer_obj_to_index or {})
         self.device = device
 
         self.group_list_buffer = torch.zeros(
@@ -145,11 +147,13 @@ class GmmRouteTracer:
         num_experts = int(first_mod.moe_config.num_experts)
         local_experts, log2phy = extract_static_ep_map(first_mod.ascend_expert_map, num_experts)
         layer_id_to_index: dict[int, int] = {}
+        layer_obj_to_index: dict[int, int] = {}
         for idx, (lid, mod) in enumerate(moe_modules):
             mod_local, mod_map = extract_static_ep_map(mod.ascend_expert_map, num_experts)
             if mod_local != local_experts or mod_map != log2phy:
                 raise ValueError(f"Non-static EP map across MoE layers at layer_id={lid}")
             layer_id_to_index[lid] = idx
+            layer_obj_to_index[id(mod)] = idx
 
         tracer = cls(
             trace_dir=target_dir,
@@ -161,14 +165,17 @@ class GmmRouteTracer:
             local_experts=local_experts,
             log2phy=log2phy,
             layer_id_to_index=layer_id_to_index,
+            layer_obj_to_index=layer_obj_to_index,
             device=device,
         )
         _ACTIVE_TRACER = tracer
         return tracer
 
     def record_group_list(self, layer: Any, group_list: torch.Tensor, group_list_type: int) -> None:
-        lid = int(getattr(layer, "layer_id", -1))
-        idx = self.layer_id_to_index.get(lid)
+        idx = self.layer_obj_to_index.get(id(layer))
+        if idx is None:
+            lid = int(getattr(layer, "layer_id", -1))
+            idx = self.layer_id_to_index.get(lid)
         if idx is None:
             return
         if group_list.ndim != 1 or int(group_list.shape[0]) != self.local_experts:
