@@ -2265,6 +2265,15 @@ class NPUModelRunner(GPUModelRunner):
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+                if getattr(self, "_gmm_route_tracer", None) is not None:
+                    self._gmm_route_tracer.begin_step(is_capturing=False)
+                    self._gmm_route_step_ctx = (
+                        list(self.input_batch.req_ids[:num_reqs]),
+                        dict(scheduler_output.num_scheduled_tokens),
+                        [int(x) for x in self.input_batch.num_computed_tokens_cpu[:num_reqs]],
+                        [int(x) for x in self.input_batch.num_prompt_tokens[:num_reqs]],
+                        int(num_tokens_padded),
+                    )
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
                     num_scheduled_tokens_np,
@@ -2703,6 +2712,17 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
         self._finalize_dump_data()
+        _route_tracer = getattr(self, "_gmm_route_tracer", None)
+        _route_ctx = getattr(self, "_gmm_route_step_ctx", None)
+        if _route_tracer is not None and _route_ctx is not None:
+            from vllm_ascend.ops.fused_moe.route_trace import build_step_rows, classify_step_phase
+
+            _req_ids, _num_sched, _num_comp, _num_prompt, _num_pad = _route_ctx
+            self._gmm_route_step_ctx = None
+            _route_tracer.end_step(
+                phase=classify_step_phase(_num_comp, _num_prompt),
+                rows=build_step_rows(_req_ids, _num_sched, _num_comp, _num_pad),
+            )
 
         if self.need_accepted_tokens:
             assert self.sampling_done_event is not None
@@ -3882,6 +3902,13 @@ class NPUModelRunner(GPUModelRunner):
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
                 self._dsa_positions_cpu_buf.fill_(0)
+            _route_tracer = getattr(self, "_gmm_route_tracer", None)
+            if _route_tracer is not None and not is_graph_capturing:
+                _pad_row = {"request_id": None, "token_position": None, "kind": "padded"}
+                _route_tracer.end_step(
+                    phase="warmup",
+                    rows=[dict(_pad_row) for _ in range(int(num_tokens))],
+                )
             return hidden_states, hidden_states
 
     @torch.inference_mode()
@@ -4191,6 +4218,21 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+        import os
+
+        if os.environ.get("VLLM_HUST_GMM_ROUTE_TRACE_DIR"):
+            from vllm.distributed.parallel_state import get_ep_group
+
+            from vllm_ascend.ops.fused_moe.route_trace import GmmRouteTracer
+
+            ep_rank = get_ep_group().rank_in_group if self.parallel_config.enable_expert_parallel else 0
+            logical_dev = int(self.device.index) if self.device.index is not None else 0
+            self._gmm_route_tracer = GmmRouteTracer.init_for_model(
+                self.model,
+                physical_rank=ep_rank,
+                logical_device=logical_dev,
+                device=self.device,
+            )
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()

@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
@@ -231,6 +232,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w1 = self._maybe_transpose(w1, mlp_compute_input.need_trans)
         hidden_states = mlp_compute_input.hidden_states
         w1_bias = layer.w13_bias if self.moe.has_bias else None
+        if os.environ.get("VLLM_HUST_GMM_ROUTE_TRACE_DIR"):
+            from vllm_ascend.ops.fused_moe.route_trace import record_gmm1_group_list
+
+            record_gmm1_group_list(layer, mlp_compute_input.group_list, mlp_compute_input.group_list_type)
         gate_up_out = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],
